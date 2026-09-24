@@ -73,7 +73,21 @@ without it the RPC is open (fine behind Cloud Run IAM or on a private network).
 
 **Timers are durable.** A timer does not fire in memory: the worker saves the
 instance with `runnableAt` set to the due time, and whichever tick comes after
-that resumes it. Timer precision is therefore "next tick after due".
+that resumes it. Timer precision is therefore "next tick after due". This
+applies to BPMN timer events only; a script's own `setTimeout(next, …)` is an
+ordinary timer that the worker waits out within the run (up to the 30s run
+limit).
+
+**Cancel and retry.** `CancelInstance` (or **Cancel instance** on the
+instance page, which asks first and takes an optional reason) stops a pending
+or running instance for good. It is a request, like a signal: the worker that
+next holds the instance carries it out — so it never races a run in progress —
+and records a `process.cancel` event with the reason; until then the instance
+reports `cancel_requested`. `RetryInstance` (**Retry** on a failed instance)
+resumes it from the last state a worker saved, i.e. where it last waited: the
+steps since then run again, and the signals that failed run had consumed are
+applied again, since a failed run keeps its inbox. A `process.retry` event
+marks the seam in the log. Neither is behind a login yet.
 
 **At-least-once.** State is saved when an instance comes to rest. If a worker
 dies mid-run, the next one repeats everything since the last save — service
@@ -137,6 +151,8 @@ Connect — same process, no client bundle, no second copy of the domain types.
 | `GET /instances/:id/elements/:elementId` | the same, plus runs, signals, output, variables, taken counts |
 | `POST /definitions/:id/start` | start an instance, then redirect to it (`HX-Redirect`, or 303) |
 | `POST /instances/:id/signal/:elementId` | signal a waiting activity; answers with the fragment named by `HX-Target` |
+| `POST /instances/:id/cancel` | request a cancel (form field `reason`) |
+| `POST /instances/:id/retry` | retry a failed instance |
 | `GET /events/stream` | SSE stream of engine events as `<li>` fragments |
 | `GET /favicon.svg` | the brand mark |
 | `GET /static/htmx.js`, `/static/sse.js` | served from the installed packages |
@@ -189,7 +205,7 @@ src/commands/worker.ts          `worker` command
 src/server/server.ts            HTTP listener: Connect routes + UI fallback
 src/server/routes.ts            ProcessService implementation
 src/server/worker-routes.ts     WorkerService (Tick) implementation
-src/server/ui.ts                dashboard routes, SSE feed, asset serving
+src/server/dashboard.ts         dashboard routes, SSE feed, asset serving
 src/server/diagram.ts           auto-layout for BPMN without diagram interchange
 src/server/element-definition.ts  what the BPMN says about one element (inspector)
 src/engine/process-engine.ts    API side: definitions, queue starts/signals

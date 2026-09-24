@@ -1,4 +1,4 @@
-<%/* Page shell. Pages pass: title, nav ({ active, worker }), diagram (bool). */%>
+<%/* Page shell. Pages pass: title, nav ({ active, worker, version }), diagram (bool). */%>
 <!doctype html>
 <html lang="en">
   <head>
@@ -75,7 +75,7 @@
       }
 
       main.wrap { padding-top: 1.75rem; padding-bottom: 3rem; flex: 1; }
-      footer { border-top: 1px solid var(--line); color: var(--muted); font-size: .8rem; padding: 1.25rem 0; }
+      footer { border-top: 1px solid var(--line); color: var(--muted); font-size: .8rem; padding: 1.25rem 0; text-align: center; }
 
       /* Content */
       h1 { margin: 0 0 .25rem; font-size: 1.4rem; letter-spacing: -.01em; }
@@ -103,6 +103,16 @@
         border: 1px solid var(--line); border-radius: .35rem; background: var(--surface); color: inherit;
       }
       button:hover { background: var(--hover); }
+      button.primary { background: var(--brand); border-color: var(--brand); color: #fff; }
+      button.primary:hover { background: var(--brand-strong); border-color: var(--brand-strong); }
+      button.danger { color: #dc2626; border-color: color-mix(in srgb, #dc2626 45%, var(--line)); }
+      button.danger:hover { background: color-mix(in srgb, #dc2626 10%, transparent); }
+      .actions { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem 1rem; margin: 0 0 1.25rem; }
+      .instance-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+                       gap: .6rem 1rem; margin: 0 0 1.25rem; }
+      .instance-head .status-line { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+      .instance-head .controls { display: flex; align-items: center; gap: .5rem; }
+      .instance-head .err { flex-basis: 100%; margin: 0; }
       form { display: flex; gap: .4rem; align-items: center; margin: 0; }
       .badge {
         display: inline-block; padding: .05rem .5rem; border-radius: 1rem;
@@ -113,6 +123,8 @@
       .badge.running   { background: color-mix(in srgb, #2b7fff 22%, transparent); }
       .badge.completed { background: color-mix(in srgb, #16a34a 22%, transparent); }
       .badge.failed    { background: color-mix(in srgb, #dc2626 26%, transparent); }
+      .badge.canceled  { background: color-mix(in srgb, #52525b 34%, transparent); text-decoration: line-through; }
+      .badge.canceling { border-style: dashed; }
       .empty { color: var(--muted); font-style: italic; padding: .8rem; margin: 0; }
       .faint { color: var(--muted); }
       .grid { display: grid; gap: .5rem; }
@@ -203,9 +215,7 @@
       <%~ it.body %>
     </main>
     <footer>
-      <div class="wrap">
-        Connect RPC: <code>struna.v1.ProcessService</code> and <code>struna.v1.WorkerService</code> on this port.
-      </div>
+      <div class="wrap"><% if (it.nav) { %><span class="mono"><%= it.nav.version %></span><% } %></div>
     </footer>
   </body>
 </html>

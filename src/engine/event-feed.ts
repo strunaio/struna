@@ -113,7 +113,7 @@ export async function waitingActivities(
   const events = await db.processEvent.findMany({
     where: {
       instanceId,
-      type: { in: ["activity.wait", "activity.end", "activity.error"] },
+      type: { in: ["activity.wait", "activity.end", "activity.error", "process.cancel"] },
     },
     orderBy: { id: "asc" },
     select: { type: true, elementId: true },
@@ -121,6 +121,8 @@ export async function waitingActivities(
 
   const waiting = new Set<string>();
   for (const event of events) {
+    // A canceled instance waits on nothing any more.
+    if (event.type === "process.cancel") waiting.clear();
     if (event.elementId === null) continue;
     if (event.type === "activity.wait") waiting.add(event.elementId);
     else waiting.delete(event.elementId);

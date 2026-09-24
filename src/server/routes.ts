@@ -43,6 +43,7 @@ const STATUS_TO_PROTO: Record<string, InstanceStatus> = {
   running: InstanceStatus.RUNNING,
   completed: InstanceStatus.COMPLETED,
   failed: InstanceStatus.FAILED,
+  canceled: InstanceStatus.CANCELED,
 };
 
 interface DefinitionRow {
@@ -60,6 +61,7 @@ interface InstanceRow {
   startedAt: Date;
   completedAt: Date | null;
   error: string | null;
+  cancelRequestedAt: Date | null;
 }
 
 function definitionMessage(row: DefinitionRow) {
@@ -82,6 +84,9 @@ function instanceMessage(row: InstanceRow) {
       ? {}
       : { completedAt: timestampFromDate(row.completedAt) }),
     ...(row.error === null ? {} : { error: row.error }),
+    // Only meaningful while the cancel is still on its way.
+    cancelRequested:
+      row.cancelRequestedAt !== null && (row.status === "pending" || row.status === "running"),
   });
 }
 
@@ -143,6 +148,22 @@ export function processRoutes(engine: ProcessEngine) {
             structTo(req.payload),
           );
           return { instance: instanceMessage(instance) };
+        } catch (cause) {
+          throw toConnectError(cause);
+        }
+      },
+
+      async cancelInstance(req) {
+        try {
+          return { instance: instanceMessage(await engine.cancel(req.id, req.reason)) };
+        } catch (cause) {
+          throw toConnectError(cause);
+        }
+      },
+
+      async retryInstance(req) {
+        try {
+          return { instance: instanceMessage(await engine.retry(req.id)) };
         } catch (cause) {
           throw toConnectError(cause);
         }

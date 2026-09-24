@@ -6,7 +6,7 @@ import { ProcessEngine } from "../engine/process-engine.js";
 import { DEFAULT_MAX_PAYLOAD_BYTES, parseRedactKeys } from "../engine/payload.js";
 import { Worker, runWorker } from "../engine/worker.js";
 import { processRoutes } from "./routes.js";
-import { handleUi } from "./ui.js";
+import { handleDashboard } from "./dashboard.js";
 import { workerRoutes } from "./worker-routes.js";
 
 type Fallback = NonNullable<
@@ -50,7 +50,7 @@ export async function startServer(
     // by `http.createServer` below, so the HTTP/1.1 half is the only one that
     // can reach here.
     fallback: ((req: IncomingMessage, res: ServerResponse) => {
-      void handleUi({ engine, req, res, worker: config.worker })
+      void handleDashboard({ engine, req, res, worker: config.worker })
         .then((handled) => {
           if (handled) return;
           res.writeHead(404, { "content-type": "text/plain" });

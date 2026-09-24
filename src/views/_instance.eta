@@ -1,21 +1,11 @@
 <div id="instance"
      hx-get="/instances/<%= encodeURIComponent(it.instance.id) %>/fragment"
-     hx-trigger="sse:engine, every 30s" hx-swap="outerHTML"
+     hx-trigger="sse:engine, instance-changed from:body, every 30s" hx-swap="outerHTML"
      data-progress="<%= JSON.stringify(it.progress) %>">
-  <h2>Status</h2>
-  <p>
-    <span class="badge <%= it.instance.status %>"><%= it.instance.status %></span>
-    <span class="mono" style="opacity:.7">
-      started <%= it.instance.startedAt.toISOString().replace("T", " ").slice(0, 19) %>
-      <% if (it.instance.completedAt) { %>· finished <%= it.instance.completedAt.toISOString().replace("T", " ").slice(0, 19) %><% } %>
-    </span>
-  </p>
-  <% if (it.instance.error) { %><div class="err mono"><%= it.instance.error %></div><% } %>
-
   <h2>Variables</h2>
   <div class="card"><pre class="json"><%= JSON.stringify(it.variables, null, 2) %></pre></div>
 
-  <% if (it.instance.status === "running" && it.progress.waiting.length > 0) { %>
+  <% if (it.instance.status === "running" && !it.instance.cancelRequestedAt && it.progress.waiting.length > 0) { %>
     <h2>Waiting on</h2>
     <% it.progress.waiting.forEach(function (elementId) { %>
       <form hx-post="/instances/<%= encodeURIComponent(it.instance.id) %>/signal/<%= encodeURIComponent(elementId) %>"

@@ -59,6 +59,7 @@ export interface TickResult {
 type Outcome =
   | { readonly kind: "completed"; readonly variables: Record<string, unknown> }
   | { readonly kind: "failed"; readonly error: string }
+  | { readonly kind: "canceled"; readonly reason: string | null }
   | {
       readonly kind: "parked";
       readonly state: Prisma.InputJsonValue;
@@ -90,17 +91,54 @@ function message(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
 }
 
+/** A timer set by a BPMN timer event (its owner carries a `timerType`). */
+function isBpmnTimer(owner: unknown): boolean {
+  return typeof (owner as { timerType?: unknown } | null)?.timerType === "string";
+}
+
 /**
- * Timers that never fire. The worker lets go of an instance as soon as it is
- * at rest, so an in-memory timeout would be lost; instead `timerRef` holds the
- * due time, which becomes the instance's `runnableAt`. On resume bpmn-elements
- * recomputes the delay from the saved expiry and fires an elapsed timer at once.
+ * Timers where BPMN timer events never fire in memory. The worker lets go of
+ * an instance as soon as it is at rest, so such a timeout would be lost;
+ * instead its `timerRef` holds the due time, which becomes the instance's
+ * `runnableAt`. On resume bpmn-elements recomputes the delay from the saved
+ * expiry and fires an elapsed timer at once.
+ *
+ * Every other timer — a script's `setTimeout(next, …)`, say — is real: it is
+ * part of the run in progress, and deferring it would park the instance
+ * mid-script and re-run the script on every resume, forever.
  */
+class DeferredTimers extends Timers {
+  constructor() {
+    super({
+      setTimeout: (callback: (...args: unknown[]) => void, delay: number, ...args: unknown[]) =>
+        setTimeout(callback, delay, ...args),
+      // A deferred timer's ref is its due time, not a handle: nothing to clear.
+      clearTimeout: (ref: unknown) => {
+        if (typeof ref !== "number") clearTimeout(ref as NodeJS.Timeout);
+      },
+    });
+  }
+
+  /** bpmn-elements' internal hook: every timer, with its owner, goes through here. */
+  _setTimeout(owner: unknown, callback: CallableFunction, delay: number, ...args: unknown[]): unknown {
+    const base = Timers.prototype as unknown as {
+      _setTimeout(this: Timers, ...a: unknown[]): unknown;
+    };
+    if (!isBpmnTimer(owner)) return base._setTimeout.call(this, owner, callback, delay, ...args);
+
+    const options = this.options as { setTimeout: (cb: unknown, delay: number) => unknown };
+    const real = options.setTimeout;
+    options.setTimeout = (_callback, ms) => Date.now() + ms;
+    try {
+      return base._setTimeout.call(this, owner, callback, delay, ...args);
+    } finally {
+      options.setTimeout = real;
+    }
+  }
+}
+
 function deferredTimers(): Timers {
-  return new Timers({
-    setTimeout: (_callback: unknown, delay: number) => Date.now() + delay,
-    clearTimeout: () => undefined,
-  });
+  return new DeferredTimers();
 }
 
 /**
@@ -149,6 +187,9 @@ function processData(engine: Engine): {
 function nextTimer(engine: Engine): Date | null {
   let earliest: number | null = null;
   for (const timer of engine.environment.timers.executing) {
+    // Only BPMN timers wake the instance later; a script's timer is part of
+    // the run, which the worker waits out.
+    if (!isBpmnTimer(timer.owner)) continue;
     // Delays past setTimeout's range are tracked without a timerRef.
     const due =
       typeof timer.timerRef === "number" ? timer.timerRef : Date.now() + timer.delay;
@@ -242,6 +283,12 @@ export class Worker {
         where: { id },
         include: { definition: true },
       });
+      // Asked to stop: do that instead of running it.
+      if (instance.cancelRequestedAt !== null) {
+        await this.#release(id, { kind: "canceled", reason: instance.cancelReason }, []);
+        return;
+      }
+
       const signals = await this.db.processSignal.findMany({
         where: { instanceId: id },
         orderBy: { id: "asc" },
@@ -289,7 +336,14 @@ export class Worker {
               error: outcome.error,
               runnableAt: null,
             }
-          : {
+          : outcome.kind === "canceled"
+            ? {
+                // State stays: it is what the instance was doing when stopped.
+                status: "canceled" satisfies InstanceStatus,
+                completedAt: now,
+                runnableAt: null,
+              }
+            : {
               status: "running" satisfies InstanceStatus,
               state: outcome.state,
               // Kept current, so reads never have to unpack engine state.
@@ -306,8 +360,34 @@ export class Worker {
       });
       if (count === 0) throw new LeaseLost(id);
 
+      if (outcome.kind === "canceled") {
+        await tx.processEvent.create({
+          data: {
+            instanceId: id,
+            type: "process.cancel",
+            payload: sanitize({ reason: outcome.reason }, this.#payloadPolicy),
+          },
+        });
+      }
+      if (outcome.kind === "failed") {
+        // The failed run's work is thrown away (its state is not saved), so
+        // the signals it consumed stay queued: a retry resumes from the last
+        // saved state and applies them again.
+        return;
+      }
       if (finished) {
         await tx.processSignal.deleteMany({ where: { instanceId: id } });
+        return;
+      }
+
+      // A cancel asked for while this run was in flight: wake the instance
+      // so the next claim carries it out, like a signal queued meanwhile.
+      const { cancelRequestedAt } = await tx.processInstance.findUniqueOrThrow({
+        where: { id },
+        select: { cancelRequestedAt: true },
+      });
+      if (cancelRequestedAt !== null) {
+        await tx.processInstance.update({ where: { id }, data: { runnableAt: now } });
         return;
       }
       if (consumed.length > 0) {

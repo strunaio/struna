@@ -1,10 +1,11 @@
 import { readFileSync } from "node:fs";
 import { afterAll, beforeAll, expect, test } from "vitest";
-import { createClient, type Client } from "@connectrpc/connect";
+import { Code, createClient, type Client } from "@connectrpc/connect";
 import { createConnectTransport } from "@connectrpc/connect-node";
-import { ProcessService } from "../src/gen/struna/v1/process_pb.js";
+import { InstanceStatus, ProcessService } from "../src/gen/struna/v1/process_pb.js";
 import { WorkerService } from "../src/gen/struna/v1/worker_pb.js";
 import { startServer, type RunningServer } from "../src/server/server.js";
+import { VERSION } from "../src/version.js";
 import { TEST_DATABASE_URL } from "./global-setup.js";
 
 const source = readFileSync("examples/hello.bpmn", "utf8");
@@ -80,6 +81,9 @@ test("marks the current section in the header", async () => {
   }
   // This server has no embedded worker, and says so.
   expect(await (await fetch(base)).text()).toContain("API only");
+  // The footer names the running version, the same one `struna --version` prints.
+  const footer = (await (await fetch(base)).text()).match(/<footer>[\s\S]*?<\/footer>/)?.[0];
+  expect(footer).toContain(VERSION);
 });
 
 test("answers htmx with a fragment and a browser with the whole page", async () => {
@@ -280,8 +284,9 @@ test("renders an instance page with its progress and a signal form", async () =>
 
   await tick();
   const after = await (await fetch(`${base}/instances/${instance!.id}/fragment`)).text();
-  expect(after).toContain('class="badge completed"');
   expect(after).toContain("&quot;done&quot;:[");
+  const head = await (await fetch(`${base}/instances/${instance!.id}/fragment?part=head`)).text();
+  expect(head).toContain('class="badge completed"');
 });
 
 test("inspects one element of an instance, with masked data", async () => {
@@ -381,4 +386,67 @@ test("shows an element's settings: script, gateway conditions, taken branches", 
   expect(settings).not.toContain("Run");
   const defPage = await (await fetch(`${base}/definitions/${definition!.id}`)).text();
   expect(defPage).toContain(`data-inspect="/definitions/${definition!.id}/elements/"`);
+});
+
+test("cancels and retries from the instance page, and starts from the definition page", async () => {
+  const definitionId = await deploy("ui-controls");
+  const defPage = await (await fetch(`${base}/definitions/${definitionId}`)).text();
+  expect(defPage).toContain(`hx-post="/definitions/${definitionId}/start"`);
+
+  const { instance } = await client.startInstance({ definitionIdOrName: definitionId });
+  await tick();
+  const id = instance!.id;
+
+  const page = await (await fetch(`${base}/instances/${id}`)).text();
+  expect(page).toContain(`hx-post="/instances/${id}/cancel"`);
+  // Controls come before the diagram.
+  expect(page.indexOf("/cancel")).toBeLessThan(page.indexOf('id="canvas"'));
+  expect(page).toContain("hx-confirm=");
+  expect(page).not.toContain(`/instances/${id}/retry`);
+
+  const htmx = {
+    "content-type": "application/x-www-form-urlencoded",
+    "hx-request": "true",
+    "hx-target": "instance-head",
+  };
+  const res = await fetch(`${base}/instances/${id}/cancel`, {
+    method: "POST",
+    headers: htmx,
+    body: new URLSearchParams({ reason: "demo" }),
+  });
+  const requested = await res.text();
+  // The controls live at the top of the page, in their own strip.
+  expect(requested.trimStart()).toMatch(/^<div id="instance-head"/);
+  expect(requested).toContain("cancel requested");
+  // …and tell the rest of the page to refresh straight away.
+  expect(res.headers.get("hx-trigger")).toBe("instance-changed");
+  const body = await (await fetch(`${base}/instances/${id}/fragment`)).text();
+  expect(body).toContain("instance-changed from:body");
+  // No Signal button while the cancel is on its way.
+  expect(body).not.toContain("/signal/review");
+
+  await tick();
+  const canceled = await client.getInstance({ id });
+  expect(canceled.instance?.status).toBe(InstanceStatus.CANCELED);
+  expect(canceled.instance?.cancelRequested).toBe(false);
+  const after = await (await fetch(`${base}/instances/${id}/fragment?part=head`)).text();
+  expect(after).toContain('class="badge canceled"');
+  expect(after).not.toContain("/cancel");
+
+  // Retry is for failed instances only, over RPC as in the dashboard.
+  await expect(client.retryInstance({ id })).rejects.toMatchObject({ code: Code.FailedPrecondition });
+  const plain = await fetch(`${base}/instances/${id}/retry`, { method: "POST", redirect: "manual" });
+  expect(plain.status).toBe(400);
+});
+
+test("cancels over RPC", async () => {
+  const definitionId = await deploy("rpc-cancel");
+  const { instance } = await client.startInstance({ definitionIdOrName: definitionId });
+  const res = await client.cancelInstance({ id: instance!.id, reason: "rpc" });
+  expect(res.instance?.cancelRequested).toBe(true);
+  await tick();
+  expect((await client.getInstance({ id: instance!.id })).instance?.status).toBe(
+    InstanceStatus.CANCELED,
+  );
+  await expect(client.cancelInstance({ id: "nope" })).rejects.toMatchObject({ code: Code.NotFound });
 });

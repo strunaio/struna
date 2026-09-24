@@ -3,5 +3,13 @@
 <h1><%= it.definition.name %> <span class="mono">v<%= it.definition.version %></span></h1>
 <p class="sub mono"><%= it.definition.id %></p>
 
+<div class="actions">
+  <form hx-post="/definitions/<%= encodeURIComponent(it.definition.id) %>/start">
+    <input type="text" name="variables" placeholder='{"requester":"vh"}' />
+    <button type="submit" class="primary">Start instance</button>
+  </form>
+  <span class="faint">Opens the new instance.</span>
+</div>
+
 <%~ include("./_diagram.eta", { definitionId: it.definition.id, legend: false }) %>
 <div id="element" aria-live="polite"></div>
