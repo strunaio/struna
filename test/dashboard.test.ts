@@ -220,8 +220,11 @@ test("serves the bpmn-js viewer and its stylesheets", async () => {
 });
 
 test("lays out a definition that has no diagram of its own", async () => {
-  const id = await deploy("ui-layout");
-  expect(source).not.toContain("BPMNDiagram");
+  // The example with its layout stripped, as hand-written BPMN usually is.
+  const bare = source.replace(/\s*<bpmndi:BPMNDiagram[\s\S]*<\/bpmndi:BPMNDiagram>/, "");
+  expect(bare).not.toContain("BPMNDiagram");
+  const { definition } = await client.deployDefinition({ name: "ui-layout", source: bare });
+  const id = definition!.id;
 
   const res = await fetch(`${base}/definitions/${id}/diagram.bpmn`);
   const xml = await res.text();
@@ -233,6 +236,13 @@ test("lays out a definition that has no diagram of its own", async () => {
   // The source only has sourceRef/targetRef; the flows must still be drawn.
   expect(xml).toContain('<bpmndi:BPMNEdge id="to-review_di" bpmnElement="to-review">');
   expect(xml).toContain('bpmnElement="to-end"');
+});
+
+test("serves a definition that has its own layout as authored", async () => {
+  expect(source).toContain("BPMNDiagram");
+  const id = await deploy("ui-authored");
+  const xml = await (await fetch(`${base}/definitions/${id}/diagram.bpmn`)).text();
+  expect(xml).toBe(source);
 });
 
 test("renders a definition page with the diagram canvas", async () => {
@@ -272,4 +282,103 @@ test("renders an instance page with its progress and a signal form", async () =>
   const after = await (await fetch(`${base}/instances/${instance!.id}/fragment`)).text();
   expect(after).toContain('class="badge completed"');
   expect(after).toContain("&quot;done&quot;:[");
+});
+
+test("inspects one element of an instance, with masked data", async () => {
+  const definitionId = await deploy("ui-inspect");
+  const { instance } = await client.startInstance({
+    definitionIdOrName: definitionId,
+    variables: { requester: "vh", apiToken: "t0ps3cret" },
+  });
+  await tick();
+  await client.signalInstance({ id: instance!.id, elementId: "review", payload: { approved: true } });
+  await tick();
+
+  const page = await (await fetch(`${base}/instances/${instance!.id}`)).text();
+  expect(page).toContain(`data-inspect="/instances/${instance!.id}/elements/"`);
+  expect(page).toContain('<div id="element"');
+  // The Variables card shows data, masked.
+  expect(page).toContain("&quot;requester&quot;: &quot;vh&quot;");
+  expect(page).not.toContain("t0ps3cret");
+
+  const res = await fetch(
+    `${base}/instances/${instance!.id}/elements/review?name=Review%20request&type=bpmn%3AUserTask`,
+  );
+  const panel = await res.text();
+  expect(res.status).toBe(200);
+  expect(panel).toContain("Review request");
+  expect(panel).toContain("UserTask");
+  expect(panel).toContain("Signal");
+  expect(panel).toContain("&quot;approved&quot;: true");
+  expect(panel).toContain("Variables after");
+  expect(panel).not.toContain("t0ps3cret");
+
+  const never = await (await fetch(`${base}/instances/${instance!.id}/elements/nowhere`)).text();
+  expect(never).toContain("has not run in this instance");
+  expect((await fetch(`${base}/instances/nope/elements/review`)).status).toBe(404);
+});
+
+// start → bump (n += 1) → again? (loop while n < 3, default → end)
+const looping = `<?xml version="1.0" encoding="UTF-8"?>
+<definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
+             xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+             xmlns:camunda="http://camunda.org/schema/1.0/bpmn"
+             id="ui-loop-defs" targetNamespace="http://struna.io/bpmn">
+  <process id="ui-loop" isExecutable="true">
+    <startEvent id="start" />
+    <sequenceFlow id="f1" sourceRef="start" targetRef="bump" />
+    <scriptTask id="bump" name="Bump n" scriptFormat="javascript">
+      <script>environment.variables.n = (environment.variables.n || 0) + 1; next();</script>
+    </scriptTask>
+    <sequenceFlow id="f2" sourceRef="bump" targetRef="again" />
+    <exclusiveGateway id="again" name="Again?" default="done" camunda:asyncBefore="true">
+      <documentation>Loop until n reaches 3</documentation>
+    </exclusiveGateway>
+    <sequenceFlow id="more" name="n &lt; 3" sourceRef="again" targetRef="bump">
+      <conditionExpression xsi:type="tFormalExpression" language="javascript">next(null, environment.variables.n &lt; 3)</conditionExpression>
+    </sequenceFlow>
+    <sequenceFlow id="done" sourceRef="again" targetRef="end" />
+    <endEvent id="end" />
+  </process>
+</definitions>`;
+
+test("shows an element's settings: script, gateway conditions, taken branches", async () => {
+  const { definition } = await client.deployDefinition({ name: "ui-loop", source: looping });
+  const { instance } = await client.startInstance({ definitionIdOrName: "ui-loop" });
+  await tick();
+
+  const script = await (await fetch(`${base}/instances/${instance!.id}/elements/bump`)).text();
+  expect(script).toContain("Bump n");
+  expect(script).toContain("environment.variables.n = (environment.variables.n || 0) + 1");
+  expect(script).toContain("Run 3 of 3");
+
+  const gateway = await (await fetch(`${base}/instances/${instance!.id}/elements/again`)).text();
+  expect(gateway).toContain("Loop until n reaches 3");
+  expect(gateway).toContain("next(null, environment.variables.n &lt; 3)");
+  // Taken twice back into the loop, once out through the default.
+  expect(gateway).toMatch(/<code>more<\/code>[\s\S]*?2 ×/);
+  expect(gateway).toMatch(/<code>done<\/code>[\s\S]*?default[\s\S]*?1 ×/);
+  expect(gateway).toContain("camunda:asyncBefore");
+  // Model defaults the XML never set are not shown as settings.
+  expect(gateway).not.toContain("gatewayDirection");
+
+  const flow = await (await fetch(`${base}/instances/${instance!.id}/elements/more`)).text();
+  expect(flow).toContain("Again? (again)");
+  expect(flow).toContain("Bump n (bump)");
+  expect(flow).toContain("2 ×");
+  expect(flow).not.toContain("has not run");
+
+  // Taken flows are painted on the diagram.
+  const page = await (await fetch(`${base}/instances/${instance!.id}`)).text();
+  expect(page).toContain("&quot;taken&quot;:{");
+
+  // Without an instance: settings only, no runs.
+  const settings = await (
+    await fetch(`${base}/definitions/${definition!.id}/elements/again`)
+  ).text();
+  expect(settings).toContain("next(null, environment.variables.n &lt; 3)");
+  expect(settings).not.toContain(" ×");
+  expect(settings).not.toContain("Run");
+  const defPage = await (await fetch(`${base}/definitions/${definition!.id}`)).text();
+  expect(defPage).toContain(`data-inspect="/definitions/${definition!.id}/elements/"`);
 });

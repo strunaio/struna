@@ -1,0 +1,120 @@
+<%/* One element: what the BPMN says it does (settings, script, conditions)
+     and, on an instance page, each run's timeline, signals, output and the
+     variables it left. Runtime values are already masked (STRUNA_REDACT_KEYS). */%>
+<%
+  function at(d) { return d ? d.toISOString().replace("T", " ").slice(0, 23) : "—"; }
+  function took(a, b) {
+    if (!a || !b) return "";
+    var ms = b.getTime() - a.getTime();
+    return ms < 1000 ? ms + " ms" : (ms / 1000).toFixed(ms < 10000 ? 2 : 1) + " s";
+  }
+  function json(v) { return JSON.stringify(v, null, 2); }
+  // Snapshots are { variables, output }; most processes never set an output.
+  function snapshot(v) {
+    var empty = v && v.output && typeof v.output === "object" && Object.keys(v.output).length === 0;
+    return empty && v.variables !== undefined ? v.variables : v;
+  }
+  function label(r) { return r.name ? r.name + " (" + r.id + ")" : r.id; }
+  var el = it.element;
+  var isFlow = el && el.flow;
+  var times = function (id) { return it.taken ? (it.taken[id] || 0) : null; };
+%>
+<div class="card inspector">
+  <div class="inspector-head">
+    <strong><%= (el && el.name) || it.elementId %></strong>
+    <code><%= it.elementId %></code>
+    <% if (el) { %><span class="faint"><%= el.type %></span><% } %>
+  </div>
+
+  <% if (el) { %>
+  <section class="run definition">
+    <% el.documentation.forEach(function (text) { %><p class="doc"><%= text %></p><% }) %>
+
+    <% if (el.script) { %>
+      <h4>Script <% if (el.script.language) { %><span class="faint mono"><%= el.script.language %></span><% } %></h4>
+      <pre class="code"><%= el.script.body %></pre>
+    <% } %>
+
+    <% if (isFlow) { %>
+      <dl class="times">
+        <dt>From</dt><dd><%= label(el.flow.source) %></dd>
+        <dt>To</dt><dd><%= label(el.flow.target) %></dd>
+        <% if (el.flow.isDefault) { %><dt>Default</dt><dd>taken when no other condition holds</dd><% } %>
+        <% if (times(el.id) !== null) { %><dt>Taken</dt><dd><%= times(el.id) %> ×</dd><% } %>
+      </dl>
+      <% if (el.flow.condition) { %>
+        <h4>Condition <% if (el.flow.condition.language) { %><span class="faint mono"><%= el.flow.condition.language %></span><% } %></h4>
+        <pre class="code"><%= el.flow.condition.body %></pre>
+      <% } %>
+    <% } %>
+
+    <% if (!isFlow && (el.outgoing.length > 1 || el.outgoing.some(function (f) { return f.condition; }))) { %>
+      <h4>Outgoing</h4>
+      <table class="flows">
+        <thead><tr><th>Flow</th><th>To</th><th>Condition</th><% if (it.taken) { %><th>Taken</th><% } %></tr></thead>
+        <tbody>
+          <% el.outgoing.forEach(function (f) { %>
+            <tr>
+              <td><code><%= f.id %></code><% if (f.name) { %> <span class="faint"><%= f.name %></span><% } %></td>
+              <td><%= label(f.target) %></td>
+              <td><% if (f.condition) { %><code class="expr"><%= f.condition.body %></code><% } else if (f.isDefault) { %><span class="faint">default</span><% } else { %><span class="faint">—</span><% } %></td>
+              <% if (it.taken) { %><td class="mono<%= times(f.id) ? "" : " faint" %>"><%= times(f.id) %> ×</td><% } %>
+            </tr>
+          <% }) %>
+        </tbody>
+      </table>
+    <% } %>
+
+    <% el.events.forEach(function (ev) { %>
+      <h4><%= ev.type %></h4>
+      <% if (ev.fields.length) { %>
+        <dl class="times"><% ev.fields.forEach(function (f) { %><dt><%= f[0] %></dt><dd class="mono"><%= f[1] %></dd><% }) %></dl>
+      <% } %>
+    <% }) %>
+
+    <% if (el.loop) { %>
+      <h4><%= el.loop.type %></h4>
+      <% if (el.loop.fields.length) { %>
+        <dl class="times"><% el.loop.fields.forEach(function (f) { %><dt><%= f[0] %></dt><dd class="mono"><%= f[1] %></dd><% }) %></dl>
+      <% } %>
+    <% } %>
+
+    <% if (el.properties.length || el.attributes.length) { %>
+      <h4>Settings</h4>
+      <dl class="times">
+        <% el.properties.concat(el.attributes).forEach(function (p) { %><dt><%= p[0] %></dt><dd class="mono"><%= p[1] %></dd><% }) %>
+      </dl>
+    <% } %>
+  </section>
+  <% } %>
+
+  <% if (it.runs && !isFlow) { %>
+    <% if (it.runs.length === 0) { %>
+      <p class="empty">This element has not run in this instance.</p>
+    <% } %>
+    <% it.runs.forEach(function (run, i) { %>
+      <section class="run">
+        <h3><%= it.runs.length > 1 ? "Run " + (i + 1) + " of " + it.runs.length : "Run" %></h3>
+        <dl class="times">
+          <dt>Started</dt><dd class="mono"><%= at(run.startedAt) %></dd>
+          <% if (run.waitedAt) { %><dt>Waiting since</dt><dd class="mono"><%= at(run.waitedAt) %></dd><% } %>
+          <dt><%= run.failed ? "Failed" : "Ended" %></dt>
+          <dd class="mono"><%= run.endedAt ? at(run.endedAt) : (run.failed ? "—" : "still running") %>
+            <% if (run.endedAt) { %><span class="faint">· took <%= took(run.startedAt, run.endedAt) %></span><% } %></dd>
+        </dl>
+        <% run.signals.forEach(function (signal) { %>
+          <h4>Signal <span class="faint mono"><%= at(signal.at) %></span></h4>
+          <pre class="json"><%= json(signal.payload) %></pre>
+        <% }) %>
+        <% if (run.output !== undefined) { %>
+          <h4>Output</h4>
+          <pre class="json"><%= json(run.output) %></pre>
+        <% } %>
+        <% if (run.variables !== undefined) { %>
+          <h4><%= run.endedAt ? "Variables after" : "Variables now" %></h4>
+          <pre class="json"><%= json(snapshot(run.variables)) %></pre>
+        <% } %>
+      </section>
+    <% }) %>
+  <% } %>
+</div>

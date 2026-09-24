@@ -6,5 +6,7 @@
 <h1><%= it.definition.name %> <span class="mono">v<%= it.definition.version %></span></h1>
 <p class="sub mono"><%= it.instance.id %></p>
 
-<%~ include("./_diagram.eta", { definitionId: it.definition.id, legend: true }) %>
+<%~ include("./_diagram.eta", { definitionId: it.definition.id, instanceId: it.instance.id, legend: true }) %>
+<%/* Filled by clicking an element; outside #instance so live refreshes keep it. */%>
+<div id="element" aria-live="polite"></div>
 <%~ include("./_instance.eta", it) %>

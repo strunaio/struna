@@ -7,6 +7,7 @@ import { Timers } from "bpmn-elements";
 import type { PrismaClient } from "../db/client.js";
 import { Prisma } from "../gen/prisma/client.js";
 import { waitingActivities } from "./event-feed.js";
+import { DEFAULT_PAYLOAD_POLICY, sanitize, type PayloadPolicy } from "./payload.js";
 import type { InstanceStatus } from "./process-engine.js";
 
 /** Engine events worth persisting; the engine emits far more than this. */
@@ -18,6 +19,8 @@ const RECORDED_EVENTS = [
   "process.start",
   "process.end",
   "process.error",
+  // Which branch a gateway took; the inspector and the diagram show it.
+  "flow.take",
 ] as const;
 
 /** Events after which the engine may have come to rest. */
@@ -36,6 +39,8 @@ export interface WorkerOptions {
    * next tick — this is what bounds a service task that never returns.
    */
   readonly runTimeoutMs?: number;
+  /** Masking and size cap for data written to the event log. */
+  readonly payloadPolicy?: PayloadPolicy;
 }
 
 export interface TickOptions {
@@ -57,6 +62,7 @@ type Outcome =
   | {
       readonly kind: "parked";
       readonly state: Prisma.InputJsonValue;
+      readonly variables: Record<string, unknown>;
       readonly wakeAt: Date | null;
     };
 
@@ -97,6 +103,49 @@ function deferredTimers(): Timers {
   });
 }
 
+/**
+ * Keys bpmn-elements copies from its run message into a process's variables;
+ * they are engine plumbing, not process data.
+ */
+const ENGINE_KEYS = new Set(["fields", "content", "properties"]);
+
+interface ProcessLike {
+  readonly environment: {
+    readonly variables: Record<string, unknown>;
+    readonly output: Record<string, unknown>;
+  };
+}
+
+/**
+ * The instance's data as its scripts and tasks see it. Variables a script
+ * sets live on the process's own environment, not the engine's, so read them
+ * from every process and fall back to the engine's when none has started.
+ */
+function processData(engine: Engine): {
+  variables: Record<string, unknown>;
+  output: Record<string, unknown>;
+} {
+  const variables: Record<string, unknown> = { ...engine.environment.variables };
+  const output: Record<string, unknown> = { ...engine.environment.output };
+  const definitions =
+    (engine.execution as unknown as {
+      definitions?: { getProcesses?(): ProcessLike[] }[];
+    } | null)?.definitions ?? [];
+  for (const definition of definitions) {
+    for (const process of definition.getProcesses?.() ?? []) {
+      for (const [key, value] of Object.entries(process.environment.variables)) {
+        if (!ENGINE_KEYS.has(key)) variables[key] = value;
+      }
+      Object.assign(output, process.environment.output);
+    }
+  }
+  // Plain JSON only: this goes into jsonb columns and event payloads.
+  return JSON.parse(JSON.stringify({ variables, output })) as {
+    variables: Record<string, unknown>;
+    output: Record<string, unknown>;
+  };
+}
+
 function nextTimer(engine: Engine): Date | null {
   let earliest: number | null = null;
   for (const timer of engine.environment.timers.executing) {
@@ -121,6 +170,7 @@ export class Worker {
   readonly id: string;
   readonly #leaseMs: number;
   readonly #runTimeoutMs: number;
+  readonly #payloadPolicy: PayloadPolicy;
 
   constructor(
     private readonly db: PrismaClient,
@@ -129,6 +179,7 @@ export class Worker {
     this.id = options.id ?? `${hostname()}:${process.pid}:${randomUUID().slice(0, 8)}`;
     this.#leaseMs = options.leaseMs ?? 60_000;
     this.#runTimeoutMs = options.runTimeoutMs ?? 30_000;
+    this.#payloadPolicy = options.payloadPolicy ?? DEFAULT_PAYLOAD_POLICY;
   }
 
   /** Run whatever is due now, within the given budget. */
@@ -196,7 +247,7 @@ export class Worker {
         orderBy: { id: "asc" },
       });
 
-      const run = new InstanceRun(this.db, id);
+      const run = new InstanceRun(this.db, id, this.#payloadPolicy);
       let outcome: Outcome;
       try {
         outcome = await run.execute({
@@ -241,6 +292,8 @@ export class Worker {
           : {
               status: "running" satisfies InstanceStatus,
               state: outcome.state,
+              // Kept current, so reads never have to unpack engine state.
+              variables: outcome.variables as Prisma.InputJsonObject,
               runnableAt: outcome.wakeAt,
             };
 
@@ -279,10 +332,13 @@ class InstanceRun {
   #engine: Engine | undefined;
   #finished: Exclude<Outcome, { kind: "parked" }> | undefined;
   #wake: (() => void) | undefined;
+  /** The last variables snapshot logged, so unchanged ones are not repeated. */
+  #loggedVariables: string | undefined;
 
   constructor(
     private readonly db: PrismaClient,
     private readonly instanceId: string,
+    private readonly policy: PayloadPolicy,
   ) {}
 
   async execute(input: {
@@ -308,6 +364,8 @@ class InstanceRun {
       await engine.execute({ listener });
     } else {
       const state = input.state as unknown as BpmnEngineExecutionState;
+      // What the log last saw: the variables saved when it was parked.
+      this.#loggedVariables = this.#snapshotKey(input.variables, {});
       engine = new Engine({ timers: deferredTimers() }).recover(state);
       this.#watch(engine);
       this.#replayedWaits = new Set(await waitingActivities(this.db, this.instanceId));
@@ -323,6 +381,7 @@ class InstanceRun {
       if (execution === null) break;
       // A signal for an element that is not waiting is ignored by the engine;
       // it is still consumed so it cannot fire at some later wait.
+      this.#record("signal", signal.elementId, signal.payload);
       execution.signal({
         id: signal.elementId,
         ...asObject(signal.payload),
@@ -338,8 +397,9 @@ class InstanceRun {
     const wakeAt = atRest ? nextTimer(engine) : new Date();
     // Round-trip through JSON so jsonb gets plain data (no undefined, no Dates).
     const state = JSON.parse(JSON.stringify(await engine.getState())) as Prisma.InputJsonValue;
+    const { variables } = processData(engine);
     await engine.stop();
-    return { kind: "parked", state, wakeAt };
+    return { kind: "parked", state, variables, wakeAt };
   }
 
   /** Wait for queued event writes, then ignore anything the engine still emits. */
@@ -350,11 +410,8 @@ class InstanceRun {
 
   #watch(engine: Engine): void {
     this.#engine = engine;
-    engine.once("end", (execution: Engine["execution"]) => {
-      this.#finished ??= {
-        kind: "completed",
-        variables: execution?.environment.variables ?? {},
-      };
+    engine.once("end", () => {
+      this.#finished ??= { kind: "completed", variables: processData(engine).variables };
       this.#wake?.();
     });
     engine.on("error", (cause: unknown) => {
@@ -392,21 +449,55 @@ class InstanceRun {
       listener.on(type, () => this.#wake?.());
     }
     for (const type of RECORDED_EVENTS) {
-      listener.on(type, (api: { id?: string; content?: { id?: string } }) => {
-        const elementId = api?.id ?? api?.content?.id;
-        if (type === "activity.wait" && elementId !== undefined) {
-          if (this.#replayedWaits.delete(elementId)) return;
-        }
-        this.#record(type, elementId);
-      });
+      listener.on(
+        type,
+        (api: { id?: string; content?: { id?: string; output?: unknown } }) => {
+          const elementId = api?.id ?? api?.content?.id;
+          if (type === "activity.wait" && elementId !== undefined) {
+            if (this.#replayedWaits.delete(elementId)) return;
+          }
+          const output = api?.content?.output;
+          this.#record(
+            type,
+            elementId,
+            type === "activity.end" && output !== undefined ? { output } : undefined,
+          );
+          // Data moves at the start and whenever an element finishes.
+          if (type === "process.start" || type === "activity.end") {
+            this.#snapshotVariables(elementId);
+          }
+        },
+      );
     }
     return listener;
   }
 
-  /** Append to the event log in emission order; `seq` must follow it. */
-  #record(type: string, elementId: string | undefined): void {
+  /** The logged form of a snapshot, used to tell whether anything changed. */
+  #snapshotKey(variables: unknown, output: unknown): string {
+    return JSON.stringify(sanitize({ variables, output }, this.policy));
+  }
+
+  /**
+   * Log a `variables` event, attributed to the element that just finished,
+   * when the instance's data differs from the last snapshot.
+   */
+  #snapshotVariables(elementId: string | undefined): void {
+    if (this.#engine === undefined) return;
+    const { variables, output } = processData(this.#engine);
+    const key = this.#snapshotKey(variables, output);
+    if (key === this.#loggedVariables) return;
+    this.#loggedVariables = key;
+    this.#record("variables", elementId, { variables, output });
+  }
+
+  /**
+   * Append to the event log in emission order; `seq` must follow it. The
+   * payload is masked and capped here, at the moment it is captured.
+   */
+  #record(type: string, elementId: string | undefined, payload?: unknown): void {
     if (this.#closed) return;
     const createdAt = new Date();
+    const data = payload === undefined ? undefined : sanitize(payload, this.policy);
     this.#writes = this.#writes
       .then(async () => {
         await this.db.processEvent.create({
@@ -414,6 +505,7 @@ class InstanceRun {
             instanceId: this.instanceId,
             type,
             elementId: elementId ?? null,
+            ...(data === undefined ? {} : { payload: data }),
             createdAt,
           },
         });

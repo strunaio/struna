@@ -4,6 +4,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { ProcessEngine } from "../engine/process-engine.js";
 import { ProcessError } from "../engine/process-engine.js";
 import { diagramXml } from "./diagram.js";
+import { describeElement } from "./element-definition.js";
 import { render } from "./views.js";
 
 const DASHBOARD_LIMIT = 25;
@@ -141,7 +142,8 @@ async function instanceModel(engine: ProcessEngine, id: string) {
     engine.elementProgress(id),
     engine.instanceEvents(id),
   ]);
-  return { instance, definition, progress, events };
+  // Shown masked; GetInstance returns the stored values.
+  return { instance, definition, progress, events, variables: engine.redact(instance.variables) };
 }
 
 async function renderInstance(engine: ProcessEngine, id: string): Promise<string> {
@@ -236,6 +238,32 @@ const ROUTES: Route[] = [
         ...model,
         title: `${model.definition.name} · ${model.instance.id} · struna`,
       });
+    },
+  },
+  {
+    method: "GET",
+    pattern: /^\/instances\/(?<id>[^/]+)\/elements\/(?<elementId>[^/]+)$/,
+    async handle({ engine, res }, params) {
+      const elementId = params["elementId"] as string;
+      const instance = await engine.getInstance(params["id"] as string);
+      const definition = await engine.getDefinition(instance.definitionId);
+      const [element, runs, progress] = await Promise.all([
+        describeElement(definition.id, definition.source, elementId),
+        engine.elementRuns(instance.id, elementId),
+        engine.elementProgress(instance.id),
+      ]);
+      html(res, render("./_element.eta", { elementId, element, runs, taken: progress.taken }));
+    },
+  },
+  {
+    method: "GET",
+    pattern: /^\/definitions\/(?<id>[^/]+)\/elements\/(?<elementId>[^/]+)$/,
+    async handle({ engine, res }, params) {
+      const elementId = params["elementId"] as string;
+      const definition = await engine.getDefinition(params["id"] as string);
+      const element = await describeElement(definition.id, definition.source, elementId);
+      // No instance: the definition half only.
+      html(res, render("./_element.eta", { elementId, element, runs: null, taken: null }));
     },
   },
   {

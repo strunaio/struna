@@ -60,8 +60,6 @@
       .tab:hover { color: var(--text); background: var(--hover); }
       .tab[aria-current="page"] { color: var(--brand-strong); background: var(--brand-tint); }
       .topbar-right { display: flex; align-items: center; gap: .9rem; font-size: .8rem; color: var(--muted); flex: none; }
-      .topbar-right a { text-decoration: none; }
-      .topbar-right a:hover { color: var(--text); }
       .pill { display: inline-flex; align-items: center; gap: .4rem; padding: .15rem .6rem;
               border: 1px solid var(--line); border-radius: 1rem; white-space: nowrap; }
       .pill::before { content: ""; width: .45rem; height: .45rem; border-radius: 50%; background: var(--muted); }
@@ -135,12 +133,45 @@
       .st-done:not(.djs-connection) .djs-visual > :nth-child(1)    { fill: #dcfce7 !important; stroke: #16a34a !important; }
       .st-waiting:not(.djs-connection) .djs-visual > :nth-child(1) { fill: #dbeafe !important; stroke: #2b7fff !important; stroke-width: 3px !important; }
       .st-failed:not(.djs-connection) .djs-visual > :nth-child(1)  { fill: #fee2e2 !important; stroke: #dc2626 !important; }
+      .st-taken.djs-connection .djs-visual > path { stroke: #16a34a !important; stroke-width: 2px !important; }
       .legend { display: flex; gap: 1rem; font-size: .8rem; color: var(--muted); margin: .5rem 0 0; }
       .legend span::before { content: ""; display: inline-block; width: .7rem; height: .7rem;
                              border-radius: .2rem; margin-right: .3rem; vertical-align: -.05rem; }
       .legend .done::before    { background: #16a34a; }
       .legend .waiting::before { background: #2b7fff; }
       .legend .failed::before  { background: #dc2626; }
+      .legend em { margin-left: auto; font-style: normal; }
+      .legend em::before { content: none; }
+      .canvas.inspectable .djs-shape { cursor: pointer; }
+      /* The viewer draws no selection outline; a glow leaves the status colours alone. */
+      .st-selected:not(.djs-connection) .djs-visual { filter: drop-shadow(0 0 3px var(--brand)) drop-shadow(0 0 1px var(--brand)); }
+      /* bpmn-js focuses its canvas on click; the frame should not light up for that. */
+      .canvas :focus, .canvas :focus-visible { outline: none; }
+      .run-count { font: 600 11px/1 ui-sans-serif, system-ui, sans-serif; color: #fff;
+                   background: var(--brand); border-radius: 1rem; padding: .2rem .4rem; white-space: nowrap; }
+
+      /* Inspector */
+      pre.json { margin: 0; padding: .7rem .8rem; overflow-x: auto; font-size: .8rem; line-height: 1.5; }
+      .inspector { margin-top: 1rem; }
+      .inspector-head { display: flex; gap: .6rem; align-items: baseline; flex-wrap: wrap;
+                        padding: .7rem .8rem; border-bottom: 1px solid var(--line); }
+      .inspector .empty { padding: .8rem; }
+      .run { padding: .2rem .8rem .8rem; }
+      .run + .run { border-top: 1px solid var(--line); }
+      .run h3 { font-size: .8rem; margin: .7rem 0 .2rem; color: var(--muted); }
+      .run h4 { font-size: .75rem; text-transform: uppercase; letter-spacing: .05em;
+                color: var(--muted); margin: .8rem 0 .3rem; }
+      .run pre.json { background: var(--bg); border: 1px solid var(--line); border-radius: .4rem; }
+      .times { display: grid; grid-template-columns: max-content 1fr; gap: .15rem 1rem; margin: .6rem 0 0; font-size: .85rem; }
+      .times dt { color: var(--muted); }
+      .times dd { margin: 0; }
+      .definition { background: color-mix(in srgb, var(--brand-tint) 45%, transparent); }
+      .doc { margin: .7rem 0 0; }
+      pre.code { margin: 0; padding: .6rem .75rem; overflow-x: auto; font-size: .8rem; line-height: 1.5;
+                 background: var(--surface); border: 1px solid var(--line); border-radius: .4rem; white-space: pre-wrap; }
+      table.flows { font-size: .85rem; background: var(--surface); border: 1px solid var(--line); border-radius: .4rem; }
+      table.flows th, table.flows td { padding: .35rem .6rem; }
+      code.expr { white-space: pre-wrap; }
     </style>
   </head>
   <body hx-ext="sse" sse-connect="/events/stream">
@@ -165,7 +196,6 @@
               <%= it.nav.worker ? "worker: embedded" : "API only" %>
             </span>
           <% } %>
-          <a href="https://github.com/strunaio/struna" rel="noopener">GitHub</a>
         </div>
       </div>
     </header>

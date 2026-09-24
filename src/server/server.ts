@@ -3,6 +3,7 @@ import { connectNodeAdapter } from "@connectrpc/connect-node";
 import type { ServeConfig } from "../config.js";
 import { assertSchema, prisma, disconnectPrisma } from "../db/client.js";
 import { ProcessEngine } from "../engine/process-engine.js";
+import { DEFAULT_MAX_PAYLOAD_BYTES, parseRedactKeys } from "../engine/payload.js";
 import { Worker, runWorker } from "../engine/worker.js";
 import { processRoutes } from "./routes.js";
 import { handleUi } from "./ui.js";
@@ -27,11 +28,17 @@ export interface RunningServer {
  * worker loop when `config.worker` is set, or by `struna worker` processes on
  * the same database.
  */
-export async function startServer(config: ServeConfig): Promise<RunningServer> {
+export async function startServer(
+  config: Omit<ServeConfig, "redactKeys"> & { readonly redactKeys?: readonly string[] },
+): Promise<RunningServer> {
   const db = prisma(config.databaseUrl);
   await assertSchema(db);
-  const engine = new ProcessEngine(db);
-  const worker = new Worker(db);
+  const payloadPolicy = {
+    redactKeys: config.redactKeys ?? parseRedactKeys(undefined),
+    maxBytes: DEFAULT_MAX_PAYLOAD_BYTES,
+  };
+  const engine = new ProcessEngine(db, { payloadPolicy });
+  const worker = new Worker(db, { payloadPolicy });
 
   const handler = connectNodeAdapter({
     routes: (router) => {

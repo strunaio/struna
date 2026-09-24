@@ -12,6 +12,9 @@
   </p>
   <% if (it.instance.error) { %><div class="err mono"><%= it.instance.error %></div><% } %>
 
+  <h2>Variables</h2>
+  <div class="card"><pre class="json"><%= JSON.stringify(it.variables, null, 2) %></pre></div>
+
   <% if (it.instance.status === "running" && it.progress.waiting.length > 0) { %>
     <h2>Waiting on</h2>
     <% it.progress.waiting.forEach(function (elementId) { %>

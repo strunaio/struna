@@ -4,3 +4,4 @@
 <p class="sub mono"><%= it.definition.id %></p>
 
 <%~ include("./_diagram.eta", { definitionId: it.definition.id, legend: false }) %>
+<div id="element" aria-live="polite"></div>

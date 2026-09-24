@@ -1,10 +1,24 @@
 <%/* Renders the definition's diagram. If the page has an element with
-     data-progress, its done/waiting/failed element ids are painted onto the
-     diagram, and repainted whenever htmx swaps that element. */%>
-<div id="canvas" class="canvas"
-     data-src="/definitions/<%= encodeURIComponent(it.definitionId) %>/diagram.bpmn"></div>
+     data-progress, its done/waiting/failed element ids, taken flows and run
+     counts are painted onto the diagram, and repainted whenever htmx swaps
+     it. Clicking an element or flow loads its inspector into #element: the
+     instance's (runs and data) when instanceId is given, else the
+     definition's (settings only). */%>
+<%
+  var inspect = it.instanceId
+    ? "/instances/" + encodeURIComponent(it.instanceId) + "/elements/"
+    : "/definitions/" + encodeURIComponent(it.definitionId) + "/elements/";
+%>
+<div id="canvas" class="canvas inspectable"
+     data-src="/definitions/<%= encodeURIComponent(it.definitionId) %>/diagram.bpmn"
+     data-inspect="<%= inspect %>"></div>
 <% if (it.legend) { %>
-<p class="legend"><span class="done">done</span><span class="waiting">waiting</span><span class="failed">failed</span></p>
+<p class="legend">
+  <span class="done">done</span><span class="waiting">waiting</span><span class="failed">failed</span>
+  <em>Click an element or flow to inspect it.</em>
+</p>
+<% } else { %>
+<p class="legend"><em>Click an element or flow to see its settings.</em></p>
 <% } %>
 <script>
   document.addEventListener("DOMContentLoaded", function () {
@@ -12,6 +26,8 @@
     var viewer = new BpmnJS({ container: container });
     var MARKERS = { done: "st-done", failed: "st-failed", waiting: "st-waiting" };
     var painted = [];
+    var badges = [];
+    var selected = null;
 
     var ready = fetch(container.dataset.src)
       .then(function (res) {
@@ -27,8 +43,11 @@
       var progress = JSON.parse(source.dataset.progress);
       var canvas = viewer.get("canvas");
       var registry = viewer.get("elementRegistry");
+      var overlays = viewer.get("overlays");
       painted.forEach(function (p) { canvas.removeMarker(p[0], p[1]); });
+      badges.forEach(function (id) { overlays.remove(id); });
       painted = [];
+      badges = [];
       Object.keys(MARKERS).forEach(function (key) {
         (progress[key] || []).forEach(function (id) {
           if (!registry.get(id)) return;
@@ -36,7 +55,40 @@
           painted.push([id, MARKERS[key]]);
         });
       });
+      Object.keys(progress.taken || {}).forEach(function (id) {
+        if (!registry.get(id)) return;
+        canvas.addMarker(id, "st-taken");
+        painted.push([id, "st-taken"]);
+      });
+      // Loops: say how many times an element ran.
+      Object.keys(progress.runs || {}).forEach(function (id) {
+        var count = progress.runs[id];
+        if (count < 2 || !registry.get(id)) return;
+        var badge = document.createElement("span");
+        badge.className = "run-count";
+        badge.textContent = "×" + count;
+        badges.push(overlays.add(id, { position: { top: -9, right: 9 }, html: badge }));
+      });
     }
+
+    function inspect(element) {
+      var canvas = viewer.get("canvas");
+      if (selected) canvas.removeMarker(selected.id, "st-selected");
+      selected = element;
+      canvas.addMarker(element.id, "st-selected");
+      htmx.ajax("GET", container.dataset.inspect + encodeURIComponent(element.id), {
+        target: "#element",
+        swap: "innerHTML",
+      });
+    }
+
+    viewer.on("element.click", function (event) {
+      var element = event.element;
+      // The canvas root has nothing to show; a label stands for its element.
+      if (!element || !element.parent) return;
+      if (element.type === "label") element = element.labelTarget;
+      if (element) inspect(element);
+    });
 
     ready.then(paint).catch(function (err) {
       container.innerHTML = "";
@@ -45,6 +97,10 @@
       message.textContent = "Could not render the diagram: " + err.message;
       container.appendChild(message);
     });
-    document.body.addEventListener("htmx:afterSwap", function () { ready.then(paint); });
+    document.body.addEventListener("htmx:afterSwap", function (event) {
+      ready.then(paint);
+      // The instance moved: refresh the open inspector with it.
+      if (selected && event.target && event.target.id === "instance") inspect(selected);
+    });
   });
 </script>
