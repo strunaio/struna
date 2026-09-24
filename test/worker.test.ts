@@ -140,3 +140,30 @@ test("definitions and instances get time-ordered UUIDv7 ids", async () => {
   // The canonical string sorts in creation order.
   expect(first.id < second.id).toBe(true);
 });
+
+test("a script that waits on setTimeout finishes within its run", async () => {
+  // Regression: script timers used to be deferred like BPMN timers, which
+  // parked the instance mid-script and re-ran the script on every resume.
+  const waiting = `<?xml version="1.0" encoding="UTF-8"?>
+<definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL" id="wait-defs"
+             targetNamespace="http://struna.io/bpmn">
+  <process id="wait" isExecutable="true">
+    <startEvent id="start" />
+    <sequenceFlow id="f1" sourceRef="start" targetRef="work" />
+    <scriptTask id="work" scriptFormat="javascript"><script>setTimeout(next, 50);</script></scriptTask>
+    <sequenceFlow id="f2" sourceRef="work" targetRef="end" />
+    <endEvent id="end" />
+  </process>
+</definitions>`;
+  const { id } = await engine.deploy("script-timer", waiting);
+  const instance = await engine.start(id, {});
+
+  await drain(new Worker(db));
+
+  expect((await engine.getInstance(instance.id)).status).toBe("completed");
+  // One run of the script, not one per resume.
+  const starts = await db.processEvent.count({
+    where: { instanceId: instance.id, type: "activity.start", elementId: "work" },
+  });
+  expect(starts).toBe(1);
+});

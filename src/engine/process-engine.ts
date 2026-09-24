@@ -4,7 +4,10 @@ import type { Prisma } from "../gen/prisma/client.js";
 import { EventFeed, waitingActivities } from "./event-feed.js";
 import { DEFAULT_PAYLOAD_POLICY, redact, type PayloadPolicy } from "./payload.js";
 
-export type InstanceStatus = "pending" | "running" | "completed" | "failed";
+export type InstanceStatus = "pending" | "running" | "completed" | "failed" | "canceled";
+
+/** Statuses an instance can still move out of by itself. */
+const ACTIVE: InstanceStatus[] = ["pending", "running"];
 
 /** Concurrent deploys of one name race for the same version; retry this often. */
 const DEPLOY_ATTEMPTS = 5;
@@ -328,11 +331,14 @@ export class ProcessEngine {
    */
   async signal(id: string, elementId: string, payload: Record<string, unknown>) {
     const instance = await this.getInstance(id);
-    if (instance.status === "completed" || instance.status === "failed") {
+    if (!ACTIVE.includes(instance.status as InstanceStatus)) {
       throw new ProcessError(
         `instance ${id} is ${instance.status}`,
         "failed_precondition",
       );
+    }
+    if (instance.cancelRequestedAt !== null) {
+      throw new ProcessError(`instance ${id} is being canceled`, "failed_precondition");
     }
 
     // Insert before waking the instance: a worker that releases it in between
@@ -347,6 +353,65 @@ export class ProcessEngine {
       }),
     ]);
 
+    return this.getInstance(id);
+  }
+
+  /**
+   * Ask for a pending or running instance to be stopped for good. The worker
+   * that next holds it carries this out — so it never races a run in
+   * progress — and records it; until then `cancelRequestedAt` shows it is
+   * on its way. Asking again is a no-op.
+   */
+  async cancel(id: string, reason: string) {
+    const instance = await this.getInstance(id);
+    if (!ACTIVE.includes(instance.status as InstanceStatus)) {
+      throw new ProcessError(`instance ${id} is ${instance.status}`, "failed_precondition");
+    }
+    if (instance.cancelRequestedAt !== null) return instance;
+
+    const now = new Date();
+    await this.db.processInstance.updateMany({
+      where: { id, status: { in: ACTIVE }, cancelRequestedAt: null },
+      // Wake it, even if it is parked on a timer far away.
+      data: { cancelRequestedAt: now, cancelReason: reason.trim() || null, runnableAt: now },
+    });
+    return this.getInstance(id);
+  }
+
+  /**
+   * Run a failed instance again from the last state a worker saved (where it
+   * last waited): every step since then runs again, and the signals that run
+   * consumed are applied again. One that failed before it was ever saved
+   * starts over with its original variables.
+   */
+  async retry(id: string) {
+    const instance = await this.getInstance(id);
+    if (instance.status !== "failed") {
+      throw new ProcessError(
+        `only a failed instance can be retried; ${id} is ${instance.status}`,
+        "failed_precondition",
+      );
+    }
+
+    await this.db.$transaction([
+      this.db.processInstance.updateMany({
+        where: { id, status: "failed" },
+        data: {
+          status: (instance.state === null ? "pending" : "running") satisfies InstanceStatus,
+          error: null,
+          completedAt: null,
+          runnableAt: new Date(),
+        },
+      }),
+      // Marks the seam in the log: steps after it are the second attempt.
+      this.db.processEvent.create({
+        data: {
+          instanceId: id,
+          type: "process.retry",
+          payload: { error: instance.error } as Prisma.InputJsonObject,
+        },
+      }),
+    ]);
     return this.getInstance(id);
   }
 }

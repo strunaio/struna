@@ -1,0 +1,40 @@
+<%/* The instance's status and controls, at the top of its page. Refreshes
+     with the engine, and after its own actions tells #instance to refresh
+     too (HX-Trigger: instance-changed). */%>
+<%
+  var active = it.instance.status === "pending" || it.instance.status === "running";
+  var canceling = active && it.instance.cancelRequestedAt;
+  var base = "/instances/" + encodeURIComponent(it.instance.id);
+  function at(d) { return d.toISOString().replace("T", " ").slice(0, 19); }
+%>
+<div id="instance-head" class="instance-head"
+     hx-get="<%= base %>/fragment?part=head"
+     hx-trigger="sse:engine, every 30s" hx-swap="outerHTML">
+  <div class="status-line">
+    <span class="badge <%= it.instance.status %>"><%= it.instance.status %></span>
+    <% if (canceling) { %><span class="badge canceling">cancel requested</span><% } %>
+    <span class="mono faint">
+      started <%= at(it.instance.startedAt) %>
+      <% if (it.instance.completedAt) { %>· finished <%= at(it.instance.completedAt) %><% } %>
+    </span>
+  </div>
+
+  <div class="controls">
+    <% if (canceling) { %>
+      <span class="faint">A worker stops it on its next tick<% if (it.instance.cancelReason) { %> — <%= it.instance.cancelReason %><% } %>.</span>
+    <% } else if (active) { %>
+      <form hx-post="<%= base %>/cancel" hx-target="#instance-head" hx-swap="outerHTML"
+            hx-confirm="Cancel this instance? It stops for good and cannot be resumed.">
+        <input type="text" name="reason" placeholder="Reason (optional)" />
+        <button type="submit" class="danger">Cancel instance</button>
+      </form>
+    <% } else if (it.instance.status === "failed") { %>
+      <form hx-post="<%= base %>/retry" hx-target="#instance-head" hx-swap="outerHTML"
+            title="Resumes from where it last waited and runs the steps since then again, signals included. Fix the cause first.">
+        <button type="submit">Retry from last saved state</button>
+      </form>
+    <% } %>
+  </div>
+
+  <% if (it.instance.error) { %><div class="err mono"><%= it.instance.error %></div><% } %>
+</div>

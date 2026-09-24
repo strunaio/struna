@@ -41,8 +41,12 @@ model ProcessDefinition {
 /// `state` is the serialized bpmn-engine state a worker resumes from.
 ///
 /// Scheduling: `runnableAt` is set when the instance has work for a worker
-/// (just started, a queued signal, a due timer) and null when it is parked or
-/// finished. A worker owns the instance while `lockedUntil` is in the future.
+/// (just started, a queued signal or cancel, a due timer) and null when it is
+/// parked or finished. A worker owns the instance while `lockedUntil` is in
+/// the future.
+///
+/// Cancel is a request, like a signal: the API sets `cancelRequestedAt` and
+/// the worker holding the lease carries it out, so it never races a run.
 model ProcessInstance {
   id           String    @id @default(uuid(7)) @db.Uuid
   definitionId String    @map("definition_id") @db.Uuid
@@ -55,6 +59,8 @@ model ProcessInstance {
   runnableAt   DateTime? @map("runnable_at") @db.Timestamptz(3)
   lockedBy     String?   @map("locked_by")
   lockedUntil  DateTime? @map("locked_until") @db.Timestamptz(3)
+  cancelRequestedAt DateTime? @map("cancel_requested_at") @db.Timestamptz(3)
+  cancelReason      String?   @map("cancel_reason")
 
   definition ProcessDefinition @relation(fields: [definitionId], references: [id], onDelete: Cascade)
   events     ProcessEvent[]

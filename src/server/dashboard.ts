@@ -5,6 +5,7 @@ import type { ProcessEngine } from "../engine/process-engine.js";
 import { ProcessError } from "../engine/process-engine.js";
 import { diagramXml } from "./diagram.js";
 import { describeElement } from "./element-definition.js";
+import { VERSION } from "../version.js";
 import { render } from "./views.js";
 
 const DASHBOARD_LIMIT = 25;
@@ -45,12 +46,12 @@ interface Route {
   readonly method: "GET" | "POST";
   readonly pattern: RegExp;
   readonly handle: (
-    ctx: UiContext,
+    ctx: DashboardContext,
     params: Record<string, string>,
   ) => Promise<void> | void;
 }
 
-interface UiContext {
+interface DashboardContext {
   readonly engine: ProcessEngine;
   readonly req: IncomingMessage;
   readonly res: ServerResponse;
@@ -62,12 +63,12 @@ type NavTab = "overview" | "definitions" | "instances" | "events";
 
 /** Render a full page, giving the layout what its header needs. */
 function page(
-  ctx: UiContext,
+  ctx: DashboardContext,
   template: string,
   active: NavTab,
   data: Record<string, unknown>,
 ): void {
-  html(ctx.res, render(template, { ...data, nav: { active, worker: ctx.worker } }));
+  html(ctx.res, render(template, { ...data, nav: { active, worker: ctx.worker, version: VERSION } }));
 }
 
 /**
@@ -126,7 +127,7 @@ async function instancesModel(engine: ProcessEngine, take: number) {
     instances.map(async (instance) => ({
       ...instance,
       waiting:
-        instance.status === "running"
+        instance.status === "running" && instance.cancelRequestedAt === null
           ? await engine.waitingActivities(instance.id)
           : [],
     })),
@@ -148,6 +149,31 @@ async function instanceModel(engine: ProcessEngine, id: string) {
 
 async function renderInstance(engine: ProcessEngine, id: string): Promise<string> {
   return render("./_instance.eta", await instanceModel(engine, id));
+}
+
+/** The status and controls strip at the top of the instance page. */
+async function renderInstanceHead(engine: ProcessEngine, id: string): Promise<string> {
+  return render("./_instance_head.eta", { instance: await engine.getInstance(id) });
+}
+
+/**
+ * After an action on the instance page: htmx swaps in the fresh fragment; a
+ * plain form post goes back to the page.
+ */
+function answerInstanceAction(
+  req: IncomingMessage,
+  res: ServerResponse,
+  id: string,
+  fragment: string,
+): void {
+  if (wantsFragment(req)) {
+    // The rest of the page (signal buttons, …) should follow at once, not on
+    // the next engine event: #instance listens for this.
+    res.setHeader("hx-trigger", "instance-changed");
+    return html(res, fragment);
+  }
+  res.writeHead(303, { location: `/instances/${encodeURIComponent(id)}` });
+  res.end();
 }
 
 const ROUTES: Route[] = [
@@ -269,8 +295,11 @@ const ROUTES: Route[] = [
   {
     method: "GET",
     pattern: /^\/instances\/(?<id>[^/]+)\/fragment$/,
-    async handle({ engine, res }, params) {
-      html(res, await renderInstance(engine, params["id"] as string));
+    async handle({ engine, req, res }, params) {
+      const id = params["id"] as string;
+      // ?part=head is the status strip; otherwise the body of the page.
+      const part = new URL(req.url ?? "/", "http://localhost").searchParams.get("part");
+      html(res, part === "head" ? await renderInstanceHead(engine, id) : await renderInstance(engine, id));
     },
   },
   {
@@ -312,6 +341,25 @@ const ROUTES: Route[] = [
           ? await renderInstance(engine, id)
           : render("./_instances.eta", await instancesModel(engine, LIST_LIMIT)),
       );
+    },
+  },
+  {
+    method: "POST",
+    pattern: /^\/instances\/(?<id>[^/]+)\/cancel$/,
+    async handle({ engine, req, res }, params) {
+      const form = await formBody(req);
+      const id = params["id"] as string;
+      await engine.cancel(id, form.get("reason") ?? "");
+      answerInstanceAction(req, res, id, await renderInstanceHead(engine, id));
+    },
+  },
+  {
+    method: "POST",
+    pattern: /^\/instances\/(?<id>[^/]+)\/retry$/,
+    async handle({ engine, req, res }, params) {
+      const id = params["id"] as string;
+      await engine.retry(id);
+      answerInstanceAction(req, res, id, await renderInstanceHead(engine, id));
     },
   },
   {
@@ -361,7 +409,7 @@ const ROUTES: Route[] = [
  * Handle a non-RPC request. Returns false when nothing matched, so the caller
  * can fall through to a 404.
  */
-export async function handleUi(ctx: UiContext): Promise<boolean> {
+export async function handleDashboard(ctx: DashboardContext): Promise<boolean> {
   const { req, res } = ctx;
   const path = new URL(req.url ?? "/", "http://localhost").pathname;
   const method = req.method === "POST" ? "POST" : "GET";

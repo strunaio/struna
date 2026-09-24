@@ -12,6 +12,11 @@ service ProcessService {
   rpc StartInstance(StartInstanceRequest) returns (StartInstanceResponse) {}
   rpc GetInstance(GetInstanceRequest) returns (GetInstanceResponse) {}
   rpc SignalInstance(SignalInstanceRequest) returns (SignalInstanceResponse) {}
+  // Stop a pending or running instance for good. A worker carries it out;
+  // the instance reports CANCELED once it has.
+  rpc CancelInstance(CancelInstanceRequest) returns (CancelInstanceResponse) {}
+  // Run a failed instance again from its last saved state.
+  rpc RetryInstance(RetryInstanceRequest) returns (RetryInstanceResponse) {}
   // Server-streaming tail of the instance's event log.
   rpc WatchInstance(WatchInstanceRequest) returns (stream WatchInstanceResponse) {}
 }
@@ -22,6 +27,7 @@ enum InstanceStatus {
   INSTANCE_STATUS_RUNNING = 2;
   INSTANCE_STATUS_COMPLETED = 3;
   INSTANCE_STATUS_FAILED = 4;
+  INSTANCE_STATUS_CANCELED = 5;
 }
 
 message ProcessDefinition {
@@ -39,6 +45,8 @@ message ProcessInstance {
   google.protobuf.Timestamp started_at = 5;
   optional google.protobuf.Timestamp completed_at = 6;
   optional string error = 7;
+  // Set once a cancel has been asked for, until a worker carries it out.
+  bool cancel_requested = 8;
 }
 
 message ProcessEvent {
@@ -93,6 +101,22 @@ message SignalInstanceRequest {
   google.protobuf.Struct payload = 3;
 }
 message SignalInstanceResponse {
+  ProcessInstance instance = 1;
+}
+
+message CancelInstanceRequest {
+  string id = 1;
+  // Why, for the event log. Optional.
+  string reason = 2;
+}
+message CancelInstanceResponse {
+  ProcessInstance instance = 1;
+}
+
+message RetryInstanceRequest {
+  string id = 1;
+}
+message RetryInstanceResponse {
   ProcessInstance instance = 1;
 }
 
