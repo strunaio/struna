@@ -92,9 +92,33 @@ Definition and instance names link to pages that draw the process with
 [bpmn-js](https://bpmn.io/toolkit/bpmn-js/) (the navigated viewer: pan and
 zoom, no editing). On an instance page, elements are coloured from the event
 log — finished, waiting, failed — and repainted live as the instance moves.
+**Inspecting.** Click any element or flow on a diagram to open its inspector.
+The top half is what the BPMN says: documentation, a script task's script,
+a gateway's outgoing flows with their conditions (and which is the default),
+a flow's condition, timer/message/signal definitions, loop settings and
+extension attributes such as `camunda:*`. On an instance page, the inspector
+adds what happened: each time the element ran (a loop shows ×N on the shape),
+when it started, waited and ended, the signal payloads it received, its
+output, the instance's variables right after it finished, and how often each
+branch was taken — taken flows are drawn green. The instance page also shows
+the current variables. This comes from the event log: workers record an
+element's output on `activity.end`, applied signals as `signal` events, taken
+flows as `flow.take`, and a `variables` snapshot whenever the data changes.
+
+Values under sensitive keys are masked as `[redacted]` — in the log when they
+are written, and on every dashboard page. `STRUNA_REDACT_KEYS` is a
+comma-separated list of key fragments, matched case-insensitively and ignoring
+`_`/`-` (so `token` also masks `accessToken` and `refresh_token`); the default
+is `password,passwd,secret,token,apikey,authorization,cookie,credential`.
+Logged payloads over 16 KB are replaced with `{"truncated": true, "bytes": …}`.
+The RPC API (`GetInstance`) still returns variables unmasked, and the
+dashboard has no login yet — keep it off public networks.
+
 Definitions deployed without diagram interchange (no `<bpmndi:BPMNDiagram>`,
-like `examples/hello.bpmn`) are laid out automatically with
-`bpmn-auto-layout`; ones that carry their own layout are drawn as authored.
+as hand-written BPMN often is) are laid out automatically with
+`bpmn-auto-layout`; ones that carry their own layout, like
+`examples/hello.bpmn`, are drawn as authored. Editors such as the BPMN
+Modeler extension for VS Code need that layout to show a file at all.
 
 The HTML routes call `ProcessEngine` directly rather than going back through
 Connect — same process, no client bundle, no second copy of the domain types.
@@ -109,6 +133,8 @@ Connect — same process, no client bundle, no second copy of the domain types.
 | `GET /definitions/:id/diagram.bpmn` | BPMN XML with a layout, for bpmn-js |
 | `GET /instances/:id` | instance page: coloured diagram, status, signals, event log |
 | `GET /instances/:id/fragment` | the instance page's live part (htmx swaps this) |
+| `GET /definitions/:id/elements/:elementId` | inspector for one element or flow: its settings |
+| `GET /instances/:id/elements/:elementId` | the same, plus runs, signals, output, variables, taken counts |
 | `POST /definitions/:id/start` | start an instance, then redirect to it (`HX-Redirect`, or 303) |
 | `POST /instances/:id/signal/:elementId` | signal a waiting activity; answers with the fragment named by `HX-Target` |
 | `GET /events/stream` | SSE stream of engine events as `<li>` fragments |
@@ -165,9 +191,11 @@ src/server/routes.ts            ProcessService implementation
 src/server/worker-routes.ts     WorkerService (Tick) implementation
 src/server/ui.ts                dashboard routes, SSE feed, asset serving
 src/server/diagram.ts           auto-layout for BPMN without diagram interchange
+src/server/element-definition.ts  what the BPMN says about one element (inspector)
 src/engine/process-engine.ts    API side: definitions, queue starts/signals
 src/engine/worker.ts            tick(): claim, run, save, release
 src/engine/event-feed.ts        tail of the event log for streams and SSE
+src/engine/payload.ts           masking and size cap for logged/displayed data
 src/views/*.eta                 Eta templates (`_`-prefixed ones are fragments)
 src/gen/                        generated code (git-ignored, run `npm run gen`)
 ```

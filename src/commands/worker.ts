@@ -1,6 +1,7 @@
 import { Command, InvalidArgumentError } from "commander";
 import { loadEnvFile, workerConfig } from "../config.js";
 import { assertSchema, disconnectPrisma, prisma } from "../db/client.js";
+import { DEFAULT_MAX_PAYLOAD_BYTES } from "../engine/payload.js";
 import { Worker, runWorker } from "../engine/worker.js";
 
 function parseMs(value: string): number {
@@ -36,7 +37,9 @@ export function workerCommand(): Command {
 
       const db = prisma(config.databaseUrl);
       await assertSchema(db);
-      const worker = new Worker(db);
+      const worker = new Worker(db, {
+        payloadPolicy: { redactKeys: config.redactKeys, maxBytes: DEFAULT_MAX_PAYLOAD_BYTES },
+      });
       const stop = new AbortController();
       const shutdown = (signal: NodeJS.Signals): void => {
         if (stop.signal.aborted) return;

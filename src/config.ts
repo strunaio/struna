@@ -1,3 +1,5 @@
+import { parseRedactKeys } from "./engine/payload.js";
+
 /**
  * Environment-backed configuration. `.env` is read with Node's built-in loader
  * so there is no dotenv dependency at runtime.
@@ -10,12 +12,16 @@ export interface ServeConfig {
   readonly worker: boolean;
   /** When set, Tick requires `Authorization: Bearer <tickToken>`. */
   readonly tickToken?: string | undefined;
+  /** Key fragments masked in the event log and the dashboard. */
+  readonly redactKeys: readonly string[];
 }
 
 export interface WorkerConfig {
   readonly databaseUrl: string;
   /** Sleep between ticks while the queue is empty. */
   readonly idleMs: number;
+  /** Key fragments masked in the event log. */
+  readonly redactKeys: readonly string[];
 }
 
 export function loadEnvFile(path = ".env"): void {
@@ -51,6 +57,7 @@ export function serveConfig(overrides: Partial<ServeConfig> = {}): ServeConfig {
     databaseUrl: databaseUrl(overrides.databaseUrl),
     worker: overrides.worker ?? false,
     tickToken: tickToken === "" ? undefined : tickToken,
+    redactKeys: overrides.redactKeys ?? parseRedactKeys(process.env["STRUNA_REDACT_KEYS"]),
   };
 }
 
@@ -58,5 +65,6 @@ export function workerConfig(overrides: Partial<WorkerConfig> = {}): WorkerConfi
   return {
     databaseUrl: databaseUrl(overrides.databaseUrl),
     idleMs: overrides.idleMs ?? intFromEnv("STRUNA_IDLE_MS", 1_000),
+    redactKeys: overrides.redactKeys ?? parseRedactKeys(process.env["STRUNA_REDACT_KEYS"]),
   };
 }

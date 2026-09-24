@@ -1,14 +1,45 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
+             xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"
+             xmlns:dc="http://www.omg.org/spec/DD/20100524/DC"
+             xmlns:di="http://www.omg.org/spec/DD/20100524/DI"
              xmlns:camunda="http://camunda.org/schema/1.0/bpmn"
              id="hello-definitions"
              targetNamespace="http://struna.io/bpmn">
   <process id="hello" isExecutable="true">
-    <startEvent id="start" />
+    <startEvent id="start" name="Request received">
+      <outgoing>to-review</outgoing>
+    </startEvent>
     <sequenceFlow id="to-review" sourceRef="start" targetRef="review" />
     <!-- A user task waits for SignalInstance(elementId="review"). -->
-    <userTask id="review" name="Review request" />
+    <userTask id="review" name="Review request">
+      <incoming>to-review</incoming>
+      <outgoing>to-end</outgoing>
+    </userTask>
     <sequenceFlow id="to-end" sourceRef="review" targetRef="end" />
-    <endEvent id="end" />
+    <endEvent id="end" name="Reviewed">
+      <incoming>to-end</incoming>
+    </endEvent>
   </process>
+  <bpmndi:BPMNDiagram id="BPMNDiagram_hello">
+    <bpmndi:BPMNPlane id="BPMNPlane_hello" bpmnElement="hello">
+      <bpmndi:BPMNShape id="start_di" bpmnElement="start">
+        <dc:Bounds x="57" y="52" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="review_di" bpmnElement="review">
+        <dc:Bounds x="175" y="30" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="end_di" bpmnElement="end">
+        <dc:Bounds x="357" y="52" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNEdge id="to-review_di" bpmnElement="to-review">
+        <di:waypoint x="93" y="70" />
+        <di:waypoint x="175" y="70" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="to-end_di" bpmnElement="to-end">
+        <di:waypoint x="275" y="70" />
+        <di:waypoint x="357" y="70" />
+      </bpmndi:BPMNEdge>
+    </bpmndi:BPMNPlane>
+  </bpmndi:BPMNDiagram>
 </definitions>

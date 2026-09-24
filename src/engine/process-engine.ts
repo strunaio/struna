@@ -2,6 +2,7 @@ import { BpmnModdle } from "bpmn-moddle";
 import type { PrismaClient } from "../db/client.js";
 import type { Prisma } from "../gen/prisma/client.js";
 import { EventFeed, waitingActivities } from "./event-feed.js";
+import { DEFAULT_PAYLOAD_POLICY, redact, type PayloadPolicy } from "./payload.js";
 
 export type InstanceStatus = "pending" | "running" | "completed" | "failed";
 
@@ -32,12 +33,36 @@ export class ProcessError extends Error {
  * database and carried out by a {@link Worker}, which may live in this process
  * or another one sharing the same database.
  */
+/** Event types that describe one element's run, for the inspector. */
+const ELEMENT_EVENTS = ["activity.start", "activity.wait", "activity.end", "activity.error", "signal"];
+
+export interface ElementRun {
+  readonly startedAt: Date | null;
+  readonly endedAt: Date | null;
+  readonly waitedAt: Date | null;
+  readonly failed: boolean;
+  readonly signals: { readonly at: Date; readonly payload: Prisma.JsonValue }[];
+  readonly output: Prisma.JsonValue | undefined;
+  /** Instance data as this run left it, or as it is now for a run still open. */
+  readonly variables: Prisma.JsonValue | undefined;
+}
+
 export class ProcessEngine {
   readonly events: EventFeed;
   readonly #moddle = new BpmnModdle();
+  readonly #policy: PayloadPolicy;
 
-  constructor(private readonly db: PrismaClient) {
+  constructor(
+    private readonly db: PrismaClient,
+    options: { readonly payloadPolicy?: PayloadPolicy } = {},
+  ) {
     this.events = new EventFeed(db);
+    this.#policy = options.payloadPolicy ?? DEFAULT_PAYLOAD_POLICY;
+  }
+
+  /** Mask sensitive keys before data is shown; the API returns it as stored. */
+  redact(value: unknown): Prisma.JsonValue {
+    return redact(value, this.#policy);
   }
 
   /** Parse-check the BPMN XML and store it as the next version of `name`. */
@@ -128,7 +153,10 @@ export class ProcessEngine {
   async elementProgress(instanceId: string) {
     const [events, waiting] = await Promise.all([
       this.db.processEvent.findMany({
-        where: { instanceId, type: { in: ["activity.end", "activity.error"] } },
+        where: {
+          instanceId,
+          type: { in: ["activity.start", "activity.end", "activity.error", "flow.take"] },
+        },
         select: { type: true, elementId: true },
       }),
       this.waitingActivities(instanceId),
@@ -136,11 +164,113 @@ export class ProcessEngine {
 
     const done = new Set<string>();
     const failed = new Set<string>();
+    /** How many times each element started — loops show as a count. */
+    const runs: Record<string, number> = {};
+    /** How many times each sequence flow was taken. */
+    const taken: Record<string, number> = {};
     for (const event of events) {
       if (event.elementId === null) continue;
-      (event.type === "activity.end" ? done : failed).add(event.elementId);
+      if (event.type === "activity.start") {
+        runs[event.elementId] = (runs[event.elementId] ?? 0) + 1;
+      } else if (event.type === "flow.take") {
+        taken[event.elementId] = (taken[event.elementId] ?? 0) + 1;
+      } else {
+        (event.type === "activity.end" ? done : failed).add(event.elementId);
+      }
     }
-    return { done: [...done], failed: [...failed], waiting };
+    return { done: [...done], failed: [...failed], waiting, runs, taken };
+  }
+
+  /**
+   * Everything the log knows about one element of an instance, one entry per
+   * time it ran: when it started, waited and ended, the signals it received,
+   * its output, and the instance's variables right after it finished.
+   */
+  async elementRuns(instanceId: string, elementId: string): Promise<ElementRun[]> {
+    const instance = await this.getInstance(instanceId);
+    const [events, snapshots] = await Promise.all([
+      this.db.processEvent.findMany({
+        where: { instanceId, elementId, type: { in: ELEMENT_EVENTS } },
+        orderBy: { id: "asc" },
+      }),
+      this.db.processEvent.findMany({
+        where: { instanceId, type: "variables" },
+        orderBy: { id: "asc" },
+        select: { id: true, elementId: true, payload: true },
+      }),
+    ]);
+
+    interface Draft {
+      startedAt: Date | null;
+      endedAt: Date | null;
+      waitedAt: Date | null;
+      failed: boolean;
+      signals: { at: Date; payload: Prisma.JsonValue }[];
+      output: Prisma.JsonValue | undefined;
+      startId: bigint | null;
+      endId: bigint | null;
+    }
+    const runs: Draft[] = [];
+    const current = (): Draft => {
+      let run = runs.at(-1);
+      if (run === undefined) {
+        run = { startedAt: null, endedAt: null, waitedAt: null, failed: false,
+                signals: [], output: undefined, startId: null, endId: null };
+        runs.push(run);
+      }
+      return run;
+    };
+    for (const event of events) {
+      const payload = event.payload as { output?: Prisma.JsonValue } | null;
+      switch (event.type) {
+        case "activity.start":
+          runs.push({ startedAt: event.createdAt, endedAt: null, waitedAt: null, failed: false,
+                      signals: [], output: undefined, startId: event.id, endId: null });
+          break;
+        case "activity.wait":
+          current().waitedAt = event.createdAt;
+          break;
+        case "signal":
+          current().signals.push({ at: event.createdAt, payload: event.payload });
+          break;
+        case "activity.end": {
+          const run = current();
+          run.endedAt = event.createdAt;
+          run.endId = event.id;
+          run.output = payload?.output;
+          break;
+        }
+        case "activity.error":
+          current().failed = true;
+          break;
+      }
+    }
+
+    return runs.map((run, index) => {
+      const nextStart = runs[index + 1]?.startId ?? null;
+      let variables: Prisma.JsonValue | undefined;
+      if (run.endId === null) {
+        // Still open: the instance's data as it is now.
+        variables = this.redact({ variables: instance.variables });
+      } else {
+        const endId = run.endId;
+        // The snapshot this element wrote when it finished; if its data did
+        // not change, none was written, so the latest earlier one applies.
+        const own = snapshots.find(
+          (s) => s.elementId === elementId && s.id > endId && (nextStart === null || s.id < nextStart),
+        );
+        variables = (own ?? snapshots.filter((s) => s.id < endId).at(-1))?.payload;
+      }
+      return {
+        startedAt: run.startedAt,
+        endedAt: run.endedAt,
+        waitedAt: run.waitedAt,
+        failed: run.failed,
+        signals: run.signals,
+        output: run.output,
+        variables,
+      };
+    });
   }
 
   async getInstance(id: string) {
