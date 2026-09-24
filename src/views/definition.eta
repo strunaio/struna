@@ -1,0 +1,6 @@
+<% layout("./layout.eta", { title: it.title, nav: it.nav, diagram: true }) %>
+<p class="crumbs"><a href="/definitions">Definitions</a> / <%= it.definition.name %></p>
+<h1><%= it.definition.name %> <span class="mono">v<%= it.definition.version %></span></h1>
+<p class="sub mono"><%= it.definition.id %></p>
+
+<%~ include("./_diagram.eta", { definitionId: it.definition.id, legend: false }) %>

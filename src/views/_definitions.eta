@@ -1,0 +1,25 @@
+<%/* Definitions table. Refreshes itself; deploys do not emit engine events. */%>
+<section id="definitions" class="card" hx-get="/definitions" hx-trigger="every 30s" hx-swap="outerHTML">
+  <% if (it.definitions.length === 0) { %>
+    <p class="empty">Nothing deployed yet — use DeployDefinition.</p>
+  <% } else { %>
+    <table>
+      <thead><tr><th>Name</th><th>Version</th><th>Deployed</th><th>Start with variables</th></tr></thead>
+      <tbody>
+        <% it.definitions.forEach(function (d) { %>
+          <tr>
+            <td><a href="/definitions/<%= encodeURIComponent(d.id) %>"><%= d.name %></a></td>
+            <td class="mono">v<%= d.version %></td>
+            <td class="mono faint"><%= d.createdAt.toISOString().replace("T", " ").slice(0, 16) %></td>
+            <td>
+              <form hx-post="/definitions/<%= encodeURIComponent(d.id) %>/start">
+                <input type="text" name="variables" placeholder='{"requester":"vh"}' />
+                <button type="submit">Start</button>
+              </form>
+            </td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  <% } %>
+</section>

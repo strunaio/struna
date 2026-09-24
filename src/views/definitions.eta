@@ -1,0 +1,4 @@
+<% layout("./layout.eta", { title: it.title, nav: it.nav }) %>
+<h1>Definitions</h1>
+<p class="sub">Every deployed version. Start one here, or with <code>StartInstance</code> by id or name.</p>
+<%~ include("./_definitions.eta", it) %>

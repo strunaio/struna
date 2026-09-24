@@ -1,0 +1,11 @@
+node_modules/
+dist/
+*.log
+
+# env
+.env
+.env.*
+!.env.example
+
+# generated protobuf code
+src/gen/

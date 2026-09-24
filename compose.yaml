@@ -1,0 +1,23 @@
+# Local Postgres for development and tests: `docker compose up -d`.
+# Published on 5433 so it does not collide with a Postgres already on 5432.
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: struna
+      POSTGRES_PASSWORD: struna
+      POSTGRES_DB: struna
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres:/var/lib/postgresql
+      # Creates the struna_test database next to struna on first start.
+      - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U struna -d struna"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+volumes:
+  postgres:

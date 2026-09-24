@@ -1,0 +1,39 @@
+<div id="instance"
+     hx-get="/instances/<%= encodeURIComponent(it.instance.id) %>/fragment"
+     hx-trigger="sse:engine, every 30s" hx-swap="outerHTML"
+     data-progress="<%= JSON.stringify(it.progress) %>">
+  <h2>Status</h2>
+  <p>
+    <span class="badge <%= it.instance.status %>"><%= it.instance.status %></span>
+    <span class="mono" style="opacity:.7">
+      started <%= it.instance.startedAt.toISOString().replace("T", " ").slice(0, 19) %>
+      <% if (it.instance.completedAt) { %>· finished <%= it.instance.completedAt.toISOString().replace("T", " ").slice(0, 19) %><% } %>
+    </span>
+  </p>
+  <% if (it.instance.error) { %><div class="err mono"><%= it.instance.error %></div><% } %>
+
+  <% if (it.instance.status === "running" && it.progress.waiting.length > 0) { %>
+    <h2>Waiting on</h2>
+    <% it.progress.waiting.forEach(function (elementId) { %>
+      <form hx-post="/instances/<%= encodeURIComponent(it.instance.id) %>/signal/<%= encodeURIComponent(elementId) %>"
+            hx-target="#instance" hx-swap="outerHTML" style="margin-bottom:.3rem">
+        <code><%= elementId %></code>
+        <input type="text" name="payload" placeholder='{"approved":true}' />
+        <button type="submit">Signal</button>
+      </form>
+    <% }) %>
+  <% } %>
+
+  <h2>Events</h2>
+  <% if (it.events.length === 0) { %>
+    <p class="empty">No events yet — waiting for a worker to pick it up.</p>
+  <% } else { %>
+    <div class="card">
+      <ul class="log">
+        <% it.events.forEach(function (e) { %>
+          <%~ include("./_event.eta", { event: e }) %>
+        <% }) %>
+      </ul>
+    </div>
+  <% } %>
+</div>

@@ -1,0 +1,39 @@
+<%/* Instances table, repainted on every engine event. */%>
+<section id="instances" class="card" hx-get="/instances" hx-trigger="sse:engine, every 30s" hx-swap="outerHTML">
+  <% if (it.instances.length === 0) { %>
+    <p class="empty">No instances yet.</p>
+  <% } else { %>
+    <table>
+      <thead><tr><th>Process</th><th>Status</th><th>Started</th><th>Waiting on</th></tr></thead>
+      <tbody>
+        <% it.instances.forEach(function (i) { %>
+          <tr>
+            <td>
+              <%= i.definition.name %> <span class="mono faint">v<%= i.definition.version %></span><br />
+              <a class="mono faint" href="/instances/<%= encodeURIComponent(i.id) %>"><%= i.id %></a>
+            </td>
+            <td>
+              <span class="badge <%= i.status %>"><%= i.status %></span>
+              <% if (i.error) { %><div class="mono faint"><%= i.error %></div><% } %>
+            </td>
+            <td class="mono faint"><%= i.startedAt.toISOString().replace("T", " ").slice(0, 19) %></td>
+            <td>
+              <% if (i.waiting.length === 0) { %>
+                <span class="faint">—</span>
+              <% } else { %>
+                <% i.waiting.forEach(function (elementId) { %>
+                  <form hx-post="/instances/<%= encodeURIComponent(i.id) %>/signal/<%= encodeURIComponent(elementId) %>"
+                        hx-target="#instances" hx-swap="outerHTML" style="margin-bottom:.3rem">
+                    <code><%= elementId %></code>
+                    <input type="text" name="payload" placeholder='{"approved":true}' />
+                    <button type="submit">Signal</button>
+                  </form>
+                <% }) %>
+              <% } %>
+            </td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  <% } %>
+</section>

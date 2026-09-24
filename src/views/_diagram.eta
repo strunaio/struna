@@ -1,0 +1,50 @@
+<%/* Renders the definition's diagram. If the page has an element with
+     data-progress, its done/waiting/failed element ids are painted onto the
+     diagram, and repainted whenever htmx swaps that element. */%>
+<div id="canvas" class="canvas"
+     data-src="/definitions/<%= encodeURIComponent(it.definitionId) %>/diagram.bpmn"></div>
+<% if (it.legend) { %>
+<p class="legend"><span class="done">done</span><span class="waiting">waiting</span><span class="failed">failed</span></p>
+<% } %>
+<script>
+  document.addEventListener("DOMContentLoaded", function () {
+    var container = document.getElementById("canvas");
+    var viewer = new BpmnJS({ container: container });
+    var MARKERS = { done: "st-done", failed: "st-failed", waiting: "st-waiting" };
+    var painted = [];
+
+    var ready = fetch(container.dataset.src)
+      .then(function (res) {
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        return res.text();
+      })
+      .then(function (xml) { return viewer.importXML(xml); })
+      .then(function () { viewer.get("canvas").zoom("fit-viewport", "auto"); });
+
+    function paint() {
+      var source = document.querySelector("[data-progress]");
+      if (!source) return;
+      var progress = JSON.parse(source.dataset.progress);
+      var canvas = viewer.get("canvas");
+      var registry = viewer.get("elementRegistry");
+      painted.forEach(function (p) { canvas.removeMarker(p[0], p[1]); });
+      painted = [];
+      Object.keys(MARKERS).forEach(function (key) {
+        (progress[key] || []).forEach(function (id) {
+          if (!registry.get(id)) return;
+          canvas.addMarker(id, MARKERS[key]);
+          painted.push([id, MARKERS[key]]);
+        });
+      });
+    }
+
+    ready.then(paint).catch(function (err) {
+      container.innerHTML = "";
+      var message = document.createElement("p");
+      message.className = "error";
+      message.textContent = "Could not render the diagram: " + err.message;
+      container.appendChild(message);
+    });
+    document.body.addEventListener("htmx:afterSwap", function () { ready.then(paint); });
+  });
+</script>

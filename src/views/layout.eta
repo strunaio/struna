@@ -1,0 +1,181 @@
+<%/* Page shell. Pages pass: title, nav ({ active, worker }), diagram (bool). */%>
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title><%= it.title %></title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <script src="/static/htmx.js" defer></script>
+    <script src="/static/sse.js" defer></script>
+    <% if (it.diagram) { %>
+    <link rel="stylesheet" href="/static/diagram-js.css" />
+    <link rel="stylesheet" href="/static/bpmn-js.css" />
+    <script src="/static/bpmn-viewer.js" defer></script>
+    <% } %>
+    <style>
+      /* Neutral greys everywhere; violet only for the brand mark, the active
+         tab and focus. Blue/green/red/grey are reserved for status. */
+      :root {
+        color-scheme: light;
+        --bg: #f8f8fb; --surface: #ffffff; --text: #16151d; --muted: #5c5a6b;
+        --line: #e6e5ee; --hover: #f0eff6;
+        --brand: #6d28d9; --brand-strong: #5b21b6; --brand-tint: #f3effe;
+        --focus: #8b5cf6;
+        --shadow: 0 1px 2px rgb(22 21 29 / 6%);
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          color-scheme: dark;
+          --bg: #0f0e14; --surface: #17161f; --text: #ebeaf2; --muted: #9d9bab;
+          --line: #2a2835; --hover: #211f2b;
+          --brand: #8b5cf6; --brand-strong: #c4b5fd; --brand-tint: rgb(139 92 246 / 16%);
+          --focus: #a78bfa;
+          --shadow: 0 1px 2px rgb(0 0 0 / 40%);
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        font: 15px/1.6 ui-sans-serif, system-ui, sans-serif; margin: 0;
+        background: var(--bg); color: var(--text);
+        min-height: 100vh; display: flex; flex-direction: column;
+      }
+      .wrap { max-width: 72rem; margin: 0 auto; padding: 0 1.25rem; width: 100%; }
+      a { color: inherit; }
+      :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: .25rem; }
+
+      /* Header */
+      .topbar { position: sticky; top: 0; z-index: 30; background: var(--surface);
+                border-bottom: 1px solid var(--line); box-shadow: var(--shadow); }
+      .topbar .wrap { height: 3.5rem; display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+      .topbar-left { display: flex; align-items: center; gap: 1.75rem; min-width: 0; }
+      .brand { display: flex; align-items: center; gap: .55rem; text-decoration: none;
+               font-weight: 800; font-size: 1.1rem; letter-spacing: -.01em; }
+      .brand-mark { width: 1.75rem; height: 1.75rem; border-radius: .45rem; background: var(--brand);
+                    color: #fff; display: grid; place-items: center; flex: none; }
+      .brand-mark svg { width: 1.2rem; height: 1.2rem; }
+      .tabs { display: flex; gap: .25rem; overflow-x: auto; }
+      .tab { padding: .4rem .75rem; border-radius: .4rem; font-size: .875rem; font-weight: 500;
+             text-decoration: none; color: var(--muted); white-space: nowrap; transition: background .1s, color .1s; }
+      .tab:hover { color: var(--text); background: var(--hover); }
+      .tab[aria-current="page"] { color: var(--brand-strong); background: var(--brand-tint); }
+      .topbar-right { display: flex; align-items: center; gap: .9rem; font-size: .8rem; color: var(--muted); flex: none; }
+      .topbar-right a { text-decoration: none; }
+      .topbar-right a:hover { color: var(--text); }
+      .pill { display: inline-flex; align-items: center; gap: .4rem; padding: .15rem .6rem;
+              border: 1px solid var(--line); border-radius: 1rem; white-space: nowrap; }
+      .pill::before { content: ""; width: .45rem; height: .45rem; border-radius: 50%; background: var(--muted); }
+      .pill.on::before { background: #16a34a; }
+      /* Narrow screens: brand and links on the first row, tabs full-width below. */
+      @media (max-width: 40rem) {
+        .topbar .wrap { height: auto; flex-wrap: wrap; row-gap: .15rem; padding-top: .5rem; padding-bottom: .35rem; }
+        .topbar-left { display: contents; }
+        .brand { order: 1; }
+        .topbar-right { order: 2; margin-left: auto; }
+        .topbar-right .pill { display: none; }
+        .tabs { order: 3; flex-basis: 100%; margin: 0 -.75rem; padding: 0 .75rem; }
+      }
+
+      main.wrap { padding-top: 1.75rem; padding-bottom: 3rem; flex: 1; }
+      footer { border-top: 1px solid var(--line); color: var(--muted); font-size: .8rem; padding: 1.25rem 0; }
+
+      /* Content */
+      h1 { margin: 0 0 .25rem; font-size: 1.4rem; letter-spacing: -.01em; }
+      h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .06em;
+           color: var(--muted); margin: 2rem 0 .6rem; }
+      .sub { margin: 0 0 1rem; color: var(--muted); }
+      .card { background: var(--surface); border: 1px solid var(--line); border-radius: .6rem;
+              box-shadow: var(--shadow); overflow-x: auto; }
+      code, pre, .mono { font-family: ui-monospace, SFMono-Regular, monospace; font-size: .85em; }
+      table { border-collapse: collapse; width: 100%; }
+      th, td { text-align: left; padding: .55rem .8rem; border-bottom: 1px solid var(--line); vertical-align: middle; }
+      tr:last-child td { border-bottom: 0; }
+      th { font-weight: 600; color: var(--muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .05em; }
+      td a { text-decoration-color: var(--line); text-underline-offset: .2em; }
+      /* Ids and timestamps stay on one line; the card scrolls sideways instead. */
+      td.mono, td .mono { white-space: nowrap; }
+      td a:hover { text-decoration-color: currentColor; }
+      input[type=text] {
+        font: inherit; font-family: ui-monospace, monospace; font-size: .85em;
+        padding: .3rem .45rem; border: 1px solid var(--line); border-radius: .35rem;
+        background: var(--bg); color: inherit; width: 11rem;
+      }
+      button {
+        font: inherit; font-size: .85em; font-weight: 500; padding: .3rem .75rem; cursor: pointer;
+        border: 1px solid var(--line); border-radius: .35rem; background: var(--surface); color: inherit;
+      }
+      button:hover { background: var(--hover); }
+      form { display: flex; gap: .4rem; align-items: center; margin: 0; }
+      .badge {
+        display: inline-block; padding: .05rem .5rem; border-radius: 1rem;
+        font-size: .72rem; letter-spacing: .03em; text-transform: uppercase;
+        border: 1px solid var(--line);
+      }
+      .badge.pending   { background: color-mix(in srgb, #a3a3a3 22%, transparent); }
+      .badge.running   { background: color-mix(in srgb, #2b7fff 22%, transparent); }
+      .badge.completed { background: color-mix(in srgb, #16a34a 22%, transparent); }
+      .badge.failed    { background: color-mix(in srgb, #dc2626 26%, transparent); }
+      .empty { color: var(--muted); font-style: italic; padding: .8rem; margin: 0; }
+      .faint { color: var(--muted); }
+      .grid { display: grid; gap: .5rem; }
+      .feed, .log { list-style: none; padding: 0; margin: 0; }
+      .feed li, .log li { padding: .4rem .8rem; border-bottom: 1px solid var(--line); }
+      .feed li:last-child, .log li:last-child { border-bottom: 0; }
+      .feed time, .log time { color: var(--muted); margin-right: .6rem; }
+      .feed.short { max-height: 22rem; overflow-y: auto; }
+      .err { padding: .6rem .8rem; border-radius: .4rem; margin-bottom: 1rem;
+             background: color-mix(in srgb, #dc2626 18%, transparent); }
+      .htmx-request { opacity: .55; transition: opacity .1s; }
+      .crumbs { margin: 0 0 1rem; color: var(--muted); font-size: .875rem; }
+
+      /* Diagram. bpmn-js draws dark strokes and labels, so the canvas stays light. */
+      .canvas { height: 24rem; border: 1px solid var(--line); border-radius: .6rem;
+                background: #fff; color: #111; overflow: hidden; }
+      .canvas .error { padding: 1rem; }
+      .st-done:not(.djs-connection) .djs-visual > :nth-child(1)    { fill: #dcfce7 !important; stroke: #16a34a !important; }
+      .st-waiting:not(.djs-connection) .djs-visual > :nth-child(1) { fill: #dbeafe !important; stroke: #2b7fff !important; stroke-width: 3px !important; }
+      .st-failed:not(.djs-connection) .djs-visual > :nth-child(1)  { fill: #fee2e2 !important; stroke: #dc2626 !important; }
+      .legend { display: flex; gap: 1rem; font-size: .8rem; color: var(--muted); margin: .5rem 0 0; }
+      .legend span::before { content: ""; display: inline-block; width: .7rem; height: .7rem;
+                             border-radius: .2rem; margin-right: .3rem; vertical-align: -.05rem; }
+      .legend .done::before    { background: #16a34a; }
+      .legend .waiting::before { background: #2b7fff; }
+      .legend .failed::before  { background: #dc2626; }
+    </style>
+  </head>
+  <body hx-ext="sse" sse-connect="/events/stream">
+    <header class="topbar">
+      <div class="wrap">
+        <div class="topbar-left">
+          <a class="brand" href="/">
+            <span class="brand-mark" aria-hidden="true"><%~ include("./_mark.eta") %></span>
+            struna
+          </a>
+          <nav class="tabs" aria-label="Main">
+            <% [["overview", "/", "Overview"], ["definitions", "/definitions", "Definitions"],
+                ["instances", "/instances", "Instances"], ["events", "/events", "Events"]].forEach(function (t) { %>
+              <a class="tab" href="<%= t[1] %>"<% if (it.nav && it.nav.active === t[0]) { %> aria-current="page"<% } %>><%= t[2] %></a>
+            <% }) %>
+          </nav>
+        </div>
+        <div class="topbar-right">
+          <% if (it.nav) { %>
+            <span class="pill<%= it.nav.worker ? " on" : "" %>"
+                  title="<%= it.nav.worker ? "This server also runs a worker" : "Work runs in separate workers or via Tick" %>">
+              <%= it.nav.worker ? "worker: embedded" : "API only" %>
+            </span>
+          <% } %>
+          <a href="https://github.com/strunaio/struna" rel="noopener">GitHub</a>
+        </div>
+      </div>
+    </header>
+    <main class="wrap">
+      <%~ it.body %>
+    </main>
+    <footer>
+      <div class="wrap">
+        Connect RPC: <code>struna.v1.ProcessService</code> and <code>struna.v1.WorkerService</code> on this port.
+      </div>
+    </footer>
+  </body>
+</html>

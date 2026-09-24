@@ -1,0 +1,1 @@
+<li><time class="mono"><%= it.event.createdAt.toISOString().slice(11, 23) %></time><code><%= it.event.type %></code><% if (it.event.elementId) { %> <span class="mono" style="opacity:.7"><%= it.event.elementId %></span><% } %></li>

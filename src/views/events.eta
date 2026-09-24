@@ -1,0 +1,4 @@
+<% layout("./layout.eta", { title: it.title, nav: it.nav }) %>
+<h1>Events</h1>
+<p class="sub">Engine activity across all instances, newest first, live.</p>
+<%~ include("./_feed.eta", { events: it.events, short: false }) %>

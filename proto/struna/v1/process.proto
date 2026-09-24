@@ -1,0 +1,104 @@
+syntax = "proto3";
+
+package struna.v1;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/struct.proto";
+
+// ProcessService deploys BPMN definitions and drives their executions.
+service ProcessService {
+  rpc DeployDefinition(DeployDefinitionRequest) returns (DeployDefinitionResponse) {}
+  rpc ListDefinitions(ListDefinitionsRequest) returns (ListDefinitionsResponse) {}
+  rpc StartInstance(StartInstanceRequest) returns (StartInstanceResponse) {}
+  rpc GetInstance(GetInstanceRequest) returns (GetInstanceResponse) {}
+  rpc SignalInstance(SignalInstanceRequest) returns (SignalInstanceResponse) {}
+  // Server-streaming tail of the instance's event log.
+  rpc WatchInstance(WatchInstanceRequest) returns (stream WatchInstanceResponse) {}
+}
+
+enum InstanceStatus {
+  INSTANCE_STATUS_UNSPECIFIED = 0;
+  INSTANCE_STATUS_PENDING = 1;
+  INSTANCE_STATUS_RUNNING = 2;
+  INSTANCE_STATUS_COMPLETED = 3;
+  INSTANCE_STATUS_FAILED = 4;
+}
+
+message ProcessDefinition {
+  string id = 1;
+  string name = 2;
+  int32 version = 3;
+  google.protobuf.Timestamp created_at = 4;
+}
+
+message ProcessInstance {
+  string id = 1;
+  string definition_id = 2;
+  InstanceStatus status = 3;
+  google.protobuf.Struct variables = 4;
+  google.protobuf.Timestamp started_at = 5;
+  optional google.protobuf.Timestamp completed_at = 6;
+  optional string error = 7;
+}
+
+message ProcessEvent {
+  string id = 1;
+  string instance_id = 2;
+  string type = 3;
+  optional string element_id = 4;
+  google.protobuf.Struct payload = 5;
+  google.protobuf.Timestamp created_at = 6;
+}
+
+message DeployDefinitionRequest {
+  string name = 1;
+  // Raw BPMN 2.0 XML.
+  string source = 2;
+}
+message DeployDefinitionResponse {
+  ProcessDefinition definition = 1;
+}
+
+message ListDefinitionsRequest {
+  int32 page_size = 1;
+  string page_token = 2;
+}
+message ListDefinitionsResponse {
+  repeated ProcessDefinition definitions = 1;
+  string next_page_token = 2;
+}
+
+message StartInstanceRequest {
+  // A definition id (a UUID) starts that exact version; anything else is a
+  // definition name and starts its latest version. Names are never UUIDs, so
+  // the two cannot be confused.
+  string definition_id_or_name = 1;
+  google.protobuf.Struct variables = 2;
+}
+message StartInstanceResponse {
+  ProcessInstance instance = 1;
+}
+
+message GetInstanceRequest {
+  string id = 1;
+}
+message GetInstanceResponse {
+  ProcessInstance instance = 1;
+}
+
+message SignalInstanceRequest {
+  string id = 1;
+  // Id of the waiting BPMN element (e.g. a user task or message catch event).
+  string element_id = 2;
+  google.protobuf.Struct payload = 3;
+}
+message SignalInstanceResponse {
+  ProcessInstance instance = 1;
+}
+
+message WatchInstanceRequest {
+  string id = 1;
+}
+message WatchInstanceResponse {
+  ProcessEvent event = 1;
+}

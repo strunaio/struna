@@ -1,0 +1,12 @@
+<% layout("./layout.eta", { title: it.title, nav: it.nav }) %>
+<h1>Overview</h1>
+<p class="sub">Deployed definitions, recent instances and the live engine feed.</p>
+
+<h2>Definitions</h2>
+<%~ include("./_definitions.eta", it) %>
+
+<h2>Instances</h2>
+<%~ include("./_instances.eta", it) %>
+
+<h2>Live events</h2>
+<%~ include("./_feed.eta", { events: it.events, short: true }) %>

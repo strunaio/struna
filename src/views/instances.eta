@@ -1,0 +1,4 @@
+<% layout("./layout.eta", { title: it.title, nav: it.nav }) %>
+<h1>Instances</h1>
+<p class="sub">Most recent first. Open one to see its diagram and event log.</p>
+<%~ include("./_instances.eta", it) %>

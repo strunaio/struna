@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+package struna.v1;
+
+// WorkerService lets an outside scheduler drive execution. Each Tick claims
+// queued work (new instances, pending signals, due timers) from the shared
+// database and runs it before returning.
+service WorkerService {
+  rpc Tick(TickRequest) returns (TickResponse) {}
+}
+
+message TickRequest {
+  // Stop claiming new instances after this many milliseconds. 0 uses the
+  // server default. A claimed instance still runs until it is at rest.
+  int32 budget_ms = 1;
+  // Process at most this many instances. 0 uses the server default.
+  int32 max_items = 2;
+}
+
+message TickResponse {
+  int32 processed = 1;
+  // True when the tick stopped on its budget or cap, so more work may be due.
+  bool more = 2;
+}

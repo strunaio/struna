@@ -1,0 +1,10 @@
+<% layout("./layout.eta", { title: it.title, nav: it.nav, diagram: true }) %>
+<p class="crumbs">
+  <a href="/instances">Instances</a> /
+  <a href="/definitions/<%= encodeURIComponent(it.definition.id) %>"><%= it.definition.name %> v<%= it.definition.version %></a>
+</p>
+<h1><%= it.definition.name %> <span class="mono">v<%= it.definition.version %></span></h1>
+<p class="sub mono"><%= it.instance.id %></p>
+
+<%~ include("./_diagram.eta", { definitionId: it.definition.id, legend: true }) %>
+<%~ include("./_instance.eta", it) %>

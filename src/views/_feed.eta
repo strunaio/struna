@@ -1,0 +1,8 @@
+<%/* Live event list; new events arrive over SSE and are prepended. */%>
+<div class="card">
+  <ul class="feed<%= it.short ? " short" : "" %>" sse-swap="engine" hx-swap="afterbegin">
+    <% it.events.forEach(function (e) { %>
+      <%~ include("./_event.eta", { event: e }) %>
+    <% }) %>
+  </ul>
+</div>

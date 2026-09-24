@@ -1,0 +1,100 @@
+// Prisma 7, Postgres only. The connection URL lives in prisma.config.ts; the
+// runtime client connects through the pg driver adapter (src/db/client.ts).
+generator client {
+  provider     = "prisma-client"
+  output       = "../src/gen/prisma"
+  moduleFormat = "esm"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// Naming: models and fields stay PascalCase/camelCase for the TypeScript
+// client; tables and columns are mapped to snake_case, so hand-written SQL
+// (psql, the worker's claim query, dashboards) needs no quoting.
+//
+// Ids: entities use UUIDv7 in native `uuid` columns — time-ordered, so new
+// rows land at the end of the index. The event log and signal inbox keep
+// bigserial ids: the event feed's cursor and signal delivery order need a
+// sequence, which millisecond timestamps from several processes cannot give.
+//
+// JSON: variables, engine state and payloads are `jsonb`. Timestamps are
+// `timestamptz`, so they mean the same instant whatever the session timezone.
+
+/// A deployed BPMN definition. `source` holds the raw BPMN 2.0 XML.
+model ProcessDefinition {
+  id        String   @id @default(uuid(7)) @db.Uuid
+  name      String
+  version   Int      @default(1)
+  source    String
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  instances ProcessInstance[]
+
+  @@unique([name, version])
+  @@map("process_definitions")
+}
+
+/// A running or finished execution of a ProcessDefinition.
+/// `state` is the serialized bpmn-engine state a worker resumes from.
+///
+/// Scheduling: `runnableAt` is set when the instance has work for a worker
+/// (just started, a queued signal, a due timer) and null when it is parked or
+/// finished. A worker owns the instance while `lockedUntil` is in the future.
+model ProcessInstance {
+  id           String    @id @default(uuid(7)) @db.Uuid
+  definitionId String    @map("definition_id") @db.Uuid
+  status       String    @default("pending")
+  variables    Json      @default("{}")
+  state        Json?
+  startedAt    DateTime  @default(now()) @map("started_at") @db.Timestamptz(3)
+  completedAt  DateTime? @map("completed_at") @db.Timestamptz(3)
+  error        String?
+  runnableAt   DateTime? @map("runnable_at") @db.Timestamptz(3)
+  lockedBy     String?   @map("locked_by")
+  lockedUntil  DateTime? @map("locked_until") @db.Timestamptz(3)
+
+  definition ProcessDefinition @relation(fields: [definitionId], references: [id], onDelete: Cascade)
+  events     ProcessEvent[]
+  signals    ProcessSignal[]
+
+  @@index([definitionId])
+  @@index([status])
+  @@index([runnableAt])
+  @@map("process_instances")
+}
+
+/// Inbox of signals waiting to be delivered by a worker, in `id` order.
+/// Rows are deleted once the worker has applied them.
+model ProcessSignal {
+  id         BigInt   @id @default(autoincrement())
+  instanceId String   @map("instance_id") @db.Uuid
+  elementId  String   @map("element_id")
+  payload    Json     @default("{}")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  instance ProcessInstance @relation(fields: [instanceId], references: [id], onDelete: Cascade)
+
+  @@index([instanceId, id])
+  @@map("process_signals")
+}
+
+/// Append-only audit trail of engine activity for an instance.
+/// `id` is a sequence: engine events routinely share a millisecond, so
+/// `createdAt` alone cannot order them.
+model ProcessEvent {
+  id         BigInt   @id @default(autoincrement())
+  instanceId String   @map("instance_id") @db.Uuid
+  type       String
+  elementId  String?  @map("element_id")
+  payload    Json     @default("{}")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  instance ProcessInstance @relation(fields: [instanceId], references: [id], onDelete: Cascade)
+
+  // Every read is "this instance's events in id order".
+  @@index([instanceId, id])
+  @@map("process_events")
+}

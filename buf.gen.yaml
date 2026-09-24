@@ -1,0 +1,14 @@
+version: v2
+clean: true
+managed:
+  enabled: true
+plugins:
+  # Connect-ES v2 no longer needs protoc-gen-connect-es: protoc-gen-es emits
+  # the service descriptors that createClient/routes consume directly.
+  - local: protoc-gen-es
+    out: src/gen
+    opt:
+      - target=ts
+      - import_extension=.js
+inputs:
+  - directory: proto
