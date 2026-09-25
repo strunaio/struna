@@ -37,13 +37,22 @@ export class ProcessError extends Error {
  * or another one sharing the same database.
  */
 /** Event types that describe one element's run, for the inspector. */
-const ELEMENT_EVENTS = ["activity.start", "activity.wait", "activity.end", "activity.error", "signal"];
+const ELEMENT_EVENTS = [
+  "activity.start",
+  "activity.wait",
+  "activity.end",
+  "activity.error",
+  "activity.discard",
+  "signal",
+];
 
 export interface ElementRun {
   readonly startedAt: Date | null;
   readonly endedAt: Date | null;
   readonly waitedAt: Date | null;
   readonly failed: boolean;
+  /** Cut short without ending, e.g. by an interrupting boundary event. */
+  readonly interrupted: boolean;
   readonly signals: { readonly at: Date; readonly payload: Prisma.JsonValue }[];
   readonly output: Prisma.JsonValue | undefined;
   /** Instance data as this run left it, or as it is now for a run still open. */
@@ -208,6 +217,7 @@ export class ProcessEngine {
       endedAt: Date | null;
       waitedAt: Date | null;
       failed: boolean;
+      interrupted: boolean;
       signals: { at: Date; payload: Prisma.JsonValue }[];
       output: Prisma.JsonValue | undefined;
       startId: bigint | null;
@@ -217,7 +227,7 @@ export class ProcessEngine {
     const current = (): Draft => {
       let run = runs.at(-1);
       if (run === undefined) {
-        run = { startedAt: null, endedAt: null, waitedAt: null, failed: false,
+        run = { startedAt: null, endedAt: null, waitedAt: null, failed: false, interrupted: false,
                 signals: [], output: undefined, startId: null, endId: null };
         runs.push(run);
       }
@@ -228,7 +238,8 @@ export class ProcessEngine {
       switch (event.type) {
         case "activity.start":
           runs.push({ startedAt: event.createdAt, endedAt: null, waitedAt: null, failed: false,
-                      signals: [], output: undefined, startId: event.id, endId: null });
+                      interrupted: false, signals: [], output: undefined, startId: event.id,
+                      endId: null });
           break;
         case "activity.wait":
           current().waitedAt = event.createdAt;
@@ -246,13 +257,21 @@ export class ProcessEngine {
         case "activity.error":
           current().failed = true;
           break;
+        case "activity.discard": {
+          const run = current();
+          run.interrupted = true;
+          run.endedAt = event.createdAt;
+          break;
+        }
       }
     }
 
     return runs.map((run, index) => {
       const nextStart = runs[index + 1]?.startId ?? null;
       let variables: Prisma.JsonValue | undefined;
-      if (run.endId === null) {
+      if (run.interrupted) {
+        variables = undefined;
+      } else if (run.endId === null) {
         // Still open: the instance's data as it is now.
         variables = this.redact({ variables: instance.variables });
       } else {
@@ -269,6 +288,7 @@ export class ProcessEngine {
         endedAt: run.endedAt,
         waitedAt: run.waitedAt,
         failed: run.failed,
+        interrupted: run.interrupted,
         signals: run.signals,
         output: run.output,
         variables,

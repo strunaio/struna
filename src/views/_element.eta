@@ -98,7 +98,7 @@
         <dl class="times">
           <dt>Started</dt><dd class="mono"><%= at(run.startedAt) %></dd>
           <% if (run.waitedAt) { %><dt>Waiting since</dt><dd class="mono"><%= at(run.waitedAt) %></dd><% } %>
-          <dt><%= run.failed ? "Failed" : "Ended" %></dt>
+          <dt><%= run.failed ? "Failed" : run.interrupted ? "Interrupted" : "Ended" %></dt>
           <dd class="mono"><%= run.endedAt ? at(run.endedAt) : (run.failed ? "—" : "still running") %>
             <% if (run.endedAt) { %><span class="faint">· took <%= took(run.startedAt, run.endedAt) %></span><% } %></dd>
         </dl>

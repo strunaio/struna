@@ -78,6 +78,14 @@ applies to BPMN timer events only; a script's own `setTimeout(next, …)` is an
 ordinary timer that the worker waits out within the run (up to the 30s run
 limit).
 
+**Task results are variables.** When a task ends, its result — the payload
+it was signalled with, or what a script passed to `next(null, …)` — is kept
+in the process variables under the task's id. A gateway after an approval
+reads `environment.variables.review_script.approved`; later tasks and the
+inspector see it too. (bpmn-engine on its own hands a result only to the flows
+leaving that task.) An activity cut short without ending — by an interrupting
+boundary event, say — is logged as `activity.discard`.
+
 **Cancel and retry.** `CancelInstance` (or **Cancel instance** on the
 instance page, which asks first and takes an optional reason) stops a pending
 or running instance for good. It is a request, like a signal: the worker that
@@ -189,6 +197,28 @@ otherwise call `WorkerService/Tick` or run `struna worker`.
 
 `WatchInstance` is a server-streaming RPC that replays an instance's event log
 and then follows it.
+
+### Examples
+
+| File | Shows |
+| --- | --- |
+| `examples/hello.bpmn` | one user task: start, signal, done |
+| `examples/video-render.bpmn` | agentic video render: agents (receive tasks) draft a script, a storyboard and a voiceover in parallel and render the cut; people (user tasks) approve the script with a revise loop, approve over-budget spend, investigate a render that runs over 2 hours (boundary timer), and sign off the release |
+| `examples/localization-qa.bpmn` | agentic localization QA for one target language (start one instance per locale): a QA tool and an MQM-style review agent score the translation; a triage script passes it, sends it to an auto-fix agent (at most `max_fix_rounds` times) or escalates to a linguist; a random `sample_rate` of passes gets a linguist spot check; a visual-QA agent checks screenshots; the client's in-country reviewer approves (reminded after 2 days by a non-interrupting timer), and an agent feeds corrections back into the TM and glossary |
+
+In `video-render.bpmn`, every step's documentation says what to signal it
+with; an agent reports back exactly like a person does:
+
+```bash
+curl -sX POST $BASE/StartInstance -H 'Content-Type: application/json' \
+  -d '{"definitionIdOrName":"video-render","variables":{"brief":"60s teaser","budget_usd":100}}'
+curl -sX POST $BASE/SignalInstance -H 'Content-Type: application/json' \
+  -d '{"id":"<instance-id>","elementId":"draft_script","payload":{"script":"…","scenes":5}}'
+curl -sX POST $BASE/SignalInstance -H 'Content-Type: application/json' \
+  -d '{"id":"<instance-id>","elementId":"review_script","payload":{"approved":true}}'
+```
+
+`test/examples.test.ts` runs both end to end.
 
 ## Layout
 
