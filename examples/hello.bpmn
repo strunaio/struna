@@ -6,7 +6,8 @@
              xmlns:camunda="http://camunda.org/schema/1.0/bpmn"
              id="hello-definitions"
              targetNamespace="http://struna.io/bpmn">
-  <process id="hello" isExecutable="true">
+  <!-- camunda:historyTimeToLive only satisfies Camunda editors' lint; struna ignores it. -->
+  <process id="hello" isExecutable="true" camunda:historyTimeToLive="P30D">
     <startEvent id="start" name="Request received">
       <outgoing>to-review</outgoing>
     </startEvent>

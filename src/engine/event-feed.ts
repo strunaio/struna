@@ -113,7 +113,9 @@ export async function waitingActivities(
   const events = await db.processEvent.findMany({
     where: {
       instanceId,
-      type: { in: ["activity.wait", "activity.end", "activity.error", "process.cancel"] },
+      type: {
+        in: ["activity.wait", "activity.end", "activity.error", "activity.discard", "process.cancel"],
+      },
     },
     orderBy: { id: "asc" },
     select: { type: true, elementId: true },

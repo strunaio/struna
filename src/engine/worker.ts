@@ -24,7 +24,7 @@ const RECORDED_EVENTS = [
 ] as const;
 
 /** Events after which the engine may have come to rest. */
-const SETTLE_EVENTS = [...RECORDED_EVENTS, "activity.timer"];
+const SETTLE_EVENTS = [...RECORDED_EVENTS, "activity.timer", "activity.leave"];
 
 /** Activity statuses where nothing will happen without a signal or a timer. */
 const AT_REST = new Set(["wait", "timer", "idle"]);
@@ -140,6 +140,44 @@ class DeferredTimers extends Timers {
 function deferredTimers(): Timers {
   return new DeferredTimers();
 }
+
+interface ActivityLike {
+  readonly id: string;
+  readonly environment: { readonly variables: Record<string, unknown> };
+  on(event: string, handler: (api: { content?: { output?: unknown } }) => void, options?: { consumerTag?: string }): void;
+  readonly broker: { cancel(consumerTag: string): void };
+}
+
+/**
+ * bpmn-engine extension: when a task ends, keep its result — the payload it
+ * was signalled with, or what a script passed to `next(null, …)` — in the
+ * process variables under the task's id. bpmn-engine itself hands a result
+ * only to the flows leaving that task; this makes an approval readable by the
+ * gateway after it (`environment.variables.review.approved`), by later tasks,
+ * and in the inspector.
+ */
+const TASK_RESULTS_TAG = "_struna-task-results";
+const extensions = {
+  taskResults(activity: ActivityLike) {
+    return {
+      activate() {
+        activity.on(
+          "end",
+          (api) => {
+            const output = api?.content?.output;
+            if (output !== undefined && output !== null) {
+              activity.environment.variables[activity.id] = output;
+            }
+          },
+          { consumerTag: TASK_RESULTS_TAG },
+        );
+      },
+      deactivate() {
+        activity.broker.cancel(TASK_RESULTS_TAG);
+      },
+    };
+  },
+};
 
 /**
  * Keys bpmn-elements copies from its run message into a process's variables;
@@ -414,6 +452,8 @@ class InstanceRun {
   #wake: (() => void) | undefined;
   /** The last variables snapshot logged, so unchanged ones are not repeated. */
   #loggedVariables: string | undefined;
+  /** Activities that ended or failed in this run, to tell a leave from a discard. */
+  #finishedActivities = new Set<string>();
 
   constructor(
     private readonly db: PrismaClient,
@@ -439,6 +479,7 @@ class InstanceRun {
         source: input.source,
         variables: input.variables,
         timers: deferredTimers(),
+        extensions,
       });
       this.#watch(engine);
       await engine.execute({ listener });
@@ -446,7 +487,7 @@ class InstanceRun {
       const state = input.state as unknown as BpmnEngineExecutionState;
       // What the log last saw: the variables saved when it was parked.
       this.#loggedVariables = this.#snapshotKey(input.variables, {});
-      engine = new Engine({ timers: deferredTimers() }).recover(state);
+      engine = new Engine({ timers: deferredTimers(), extensions }).recover(state);
       this.#watch(engine);
       this.#replayedWaits = new Set(await waitingActivities(this.db, this.instanceId));
       await engine.resume({ listener });
@@ -536,6 +577,12 @@ class InstanceRun {
           if (type === "activity.wait" && elementId !== undefined) {
             if (this.#replayedWaits.delete(elementId)) return;
           }
+          if (elementId !== undefined) {
+            if (type === "activity.start") this.#finishedActivities.delete(elementId);
+            if (type === "activity.end" || type === "activity.error") {
+              this.#finishedActivities.add(elementId);
+            }
+          }
           const output = api?.content?.output;
           this.#record(
             type,
@@ -549,6 +596,15 @@ class InstanceRun {
         },
       );
     }
+    // Leaving without ending means the activity was cut short — an
+    // interrupting boundary event fired, say. Log that, or the task would
+    // look like it is still waiting.
+    listener.on("activity.leave", (api: { id?: string }) => {
+      const elementId = api?.id;
+      if (elementId === undefined) return;
+      if (this.#finishedActivities.delete(elementId)) return;
+      this.#record("activity.discard", elementId);
+    });
     return listener;
   }
 
