@@ -10,21 +10,23 @@
 
   Start variables: { "brief": "...", "budget_usd": 100 }
 
-  The camunda namespace and camunda:historyTimeToLive are there only for
-  Camunda-based editors (e.g. the BPMN Modeler extension for VS Code): the
-  namespace lets them recognise and open the file, and the history setting
-  satisfies their Camunda 7 lint rule. struna ignores both; its history is the
-  event log.
+  The zeebe namespace and modeler:executionPlatform mark the file as
+  Camunda 8, so Camunda-based editors (e.g. the BPMN Modeler extension for
+  VS Code) open it in that mode — the one struna's element templates and
+  service icons are for.
 -->
 <definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
              xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
              xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"
              xmlns:dc="http://www.omg.org/spec/DD/20100524/DC"
              xmlns:di="http://www.omg.org/spec/DD/20100524/DI"
-             xmlns:camunda="http://camunda.org/schema/1.0/bpmn"
+             xmlns:zeebe="http://camunda.org/schema/zeebe/1.0"
+             xmlns:modeler="http://camunda.org/schema/modeler/1.0"
+             modeler:executionPlatform="Camunda Cloud"
+             modeler:executionPlatformVersion="8.7.0"
              id="video-render-definitions"
              targetNamespace="http://struna.io/bpmn">
-  <process id="video_render" name="Agentic video render" isExecutable="true" camunda:historyTimeToLive="P30D">
+  <process id="video_render" name="Agentic video render" isExecutable="true">
 
     <startEvent id="brief_received" name="Brief received">
       <outgoing>to_draft</outgoing>
@@ -46,6 +48,9 @@
 
     <userTask id="review_script" name="Review script">
       <documentation>Editor approves the script or sends it back. Signal: { "approved": true } or { "approved": false, "feedback": "..." }</documentation>
+      <extensionElements>
+        <zeebe:userTask />
+      </extensionElements>
       <incoming>to_review_script</incoming>
       <outgoing>to_script_ok</outgoing>
     </userTask>
@@ -82,6 +87,9 @@ next(null, { usd: (draft.scenes || 1) * 12 });</script>
 
     <userTask id="approve_budget" name="Approve budget (producer)">
       <documentation>The estimate is over budget_usd. Signal: { "approved": true } to spend it anyway.</documentation>
+      <extensionElements>
+        <zeebe:userTask />
+      </extensionElements>
       <incoming>over_budget</incoming>
       <outgoing>to_budget_ok</outgoing>
     </userTask>
@@ -155,6 +163,9 @@ next(null, { usd: (draft.scenes || 1) * 12 });</script>
     <sequenceFlow id="to_investigate" sourceRef="render_timeout" targetRef="investigate_render" />
     <userTask id="investigate_render" name="Investigate stalled render">
       <documentation>The render agent went quiet. Fix it, then signal { } to render again.</documentation>
+      <extensionElements>
+        <zeebe:userTask />
+      </extensionElements>
       <incoming>to_investigate</incoming>
       <outgoing>render_again</outgoing>
     </userTask>
@@ -163,6 +174,9 @@ next(null, { usd: (draft.scenes || 1) * 12 });</script>
     <sequenceFlow id="to_final_review" sourceRef="render_video" targetRef="final_review" />
     <userTask id="final_review" name="Final review">
       <documentation>Watch the cut. Signal: { "approved": true } to publish, { "approved": false } to reject.</documentation>
+      <extensionElements>
+        <zeebe:userTask />
+      </extensionElements>
       <incoming>to_final_review</incoming>
       <outgoing>to_release_ok</outgoing>
     </userTask>

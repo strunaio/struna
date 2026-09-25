@@ -104,3 +104,41 @@ model ProcessEvent {
   @@index([instanceId, id])
   @@map("process_events")
 }
+
+/// A protobuf descriptor set (`buf build -o …`), as registered. Services point
+/// at the set that describes them; a newer registration adds a new set.
+model DescriptorSet {
+  id        String   @id @default(uuid(7)) @db.Uuid
+  /// Serialized google.protobuf.FileDescriptorSet, imports included.
+  content   Bytes
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  services Service[]
+
+  @@map("descriptor_sets")
+}
+
+/// A Connect/gRPC service struna can call from a service task. Identified by
+/// its full proto name, which the package makes globally unique; the process
+/// names only the method, and this row says where the service runs.
+model Service {
+  /// e.g. "acme.slack.v1.ChatService"
+  name            String   @id
+  descriptorSetId String   @map("descriptor_set_id") @db.Uuid
+  
+  baseUrl         String   @map("base_url")
+  /// "connect", "grpc" or "grpcweb".
+  protocol        String   @default("connect")
+  /// Shown in editors (element templates) and on the dashboard's diagrams.
+  /// Default: the service's name without its package and "Service" suffix.
+  title           String?
+  /// A data: URI (SVG or PNG). Default: a generated monogram tile.
+  icon            String?
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  descriptorSet DescriptorSet @relation(fields: [descriptorSetId], references: [id])
+
+  @@index([descriptorSetId])
+  @@map("services")
+}

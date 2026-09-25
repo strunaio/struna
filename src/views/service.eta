@@ -1,0 +1,88 @@
+<% layout("./layout.eta", { title: it.title, nav: it.nav }) %>
+<%
+  function at(d) { return d.toISOString().replace("T", " ").slice(0, 19); }
+  var s = it.service;
+%>
+<p class="crumbs"><a href="/services">Services</a> / <%= s.title %></p>
+<div class="service-head">
+  <img class="service-icon large" src="<%= s.icon %>" alt="" />
+  <div>
+    <h1><%= s.title %></h1>
+    <p class="sub mono"><%= s.name %></p>
+  </div>
+</div>
+
+<div class="card">
+  <dl class="times service-facts">
+    <dt>Base URL</dt><dd class="mono"><%= s.baseUrl %></dd>
+    <dt>Protocol</dt><dd class="mono"><%= s.protocol %></dd>
+    <dt>Icon</dt><dd><%= s.customIcon ? "custom" : "generated (monogram)" %></dd>
+    <dt>Registered</dt><dd class="mono"><%= at(s.updatedAt) %></dd>
+  </dl>
+</div>
+
+<h2>Methods</h2>
+<% it.methods.forEach(function (m) { %>
+  <section class="card method" id="method-<%= m.name %>">
+    <div class="method-head">
+      <strong><%= m.name %></strong>
+      <code class="faint"><%= m.path %></code>
+      <% if (m.kind !== "unary") { %><span class="badge pending"><%= m.kind.replace("_", "-") %> · not callable from service tasks</span><% } %>
+    </div>
+    <p class="faint mono method-types"><%= m.input %> → <%= m.output %></p>
+    <% if (m.fields.length === 0) { %>
+      <p class="empty">No request fields.</p>
+    <% } else { %>
+      <table class="fields">
+        <thead><tr><th>Input target</th><th>Type</th></tr></thead>
+        <tbody>
+          <% m.fields.forEach(function (f) { %>
+            <tr>
+              <td><code><%= f.target %></code></td>
+              <td class="mono faint"><%= f.type %><% if (f.json) { %> · JSON / FEEL<% } %><% if (f.choices) { %> · <%= f.choices.join(" | ") %><% } %></td>
+            </tr>
+          <% }) %>
+        </tbody>
+      </table>
+    <% } %>
+    <% if (m.usedBy.length > 0) { %>
+      <p class="used-by">Used by
+        <% m.usedBy.forEach(function (u, i) { %><%= i ? ", " : "" %><a href="/definitions/<%= encodeURIComponent(u.definition.id) %>"><%= u.definition.name %> v<%= u.definition.version %></a> <code class="faint"><%= u.elementId %></code><% }) %>
+      </p>
+    <% } %>
+  </section>
+<% }) %>
+
+<h2>Recent calls</h2>
+<div class="card">
+  <% if (it.calls.length === 0) { %>
+    <p class="empty">No calls yet.</p>
+  <% } else { %>
+    <table>
+      <thead><tr><th>When</th><th>Result</th><th>Process</th><th>Step</th><th>Instance</th></tr></thead>
+      <tbody>
+        <% it.calls.forEach(function (c) { %>
+          <tr>
+            <td class="mono faint"><%= at(c.at) %></td>
+            <td><span class="badge <%= c.ok ? "completed" : "failed" %>"><%= c.ok ? "ok" : "failed" %></span></td>
+            <td><% if (c.definition) { %><%= c.definition.name %> <span class="mono faint">v<%= c.definition.version %></span><% } %></td>
+            <td><code><%= c.elementId %></code></td>
+            <td><a class="mono faint" href="/instances/<%= encodeURIComponent(c.instance.id) %>"><%= c.instance.id %></a></td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  <% } %>
+</div>
+
+<h2>Manage</h2>
+<%
+  // Joined here: Eta trims the newline after each tag, which would run lines together.
+  var manage = [
+    "npx struna services appearance " + s.name + ' --title "…" --icon icon.svg',
+    "npx struna services add --descriptor api.binpb --url " + s.baseUrl + " --service " + s.name,
+    "npx struna templates export",
+    "npx struna services remove " + s.name,
+  ].join("\n");
+%>
+<div class="card"><pre class="code manage"><%= manage %></pre></div>

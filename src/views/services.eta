@@ -1,0 +1,32 @@
+<% layout("./layout.eta", { title: it.title, nav: it.nav }) %>
+<h1>Services</h1>
+<p class="sub">
+  Connect/gRPC services that service tasks can call. Read-only here: the
+  registry decides which URLs struna calls, so it is managed with
+  <code>struna services</code> (or the admin-token RPC).
+</p>
+<section class="card">
+  <% if (it.services.length === 0) { %>
+    <p class="empty">No services registered. <code>npx struna services add --descriptor api.binpb --url https://…</code></p>
+  <% } else { %>
+    <table>
+      <thead><tr><th>Service</th><th>Protocol</th><th>Base URL</th><th>Methods</th><th>Registered</th></tr></thead>
+      <tbody>
+        <% it.services.forEach(function (s) { %>
+          <tr>
+            <td>
+              <a class="service-name" href="/services/<%= encodeURIComponent(s.name) %>">
+                <img class="service-icon inline" src="<%= s.icon %>" alt="" />
+                <span><%= s.title %><br /><span class="mono faint"><%= s.name %></span></span>
+              </a>
+            </td>
+            <td class="mono"><%= s.protocol %></td>
+            <td class="mono"><%= s.baseUrl %></td>
+            <td class="mono"><%= s.callable %><% if (s.callable !== s.methods.length) { %> <span class="faint">of <%= s.methods.length %></span><% } %></td>
+            <td class="mono faint"><%= s.updatedAt.toISOString().replace("T", " ").slice(0, 16) %></td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  <% } %>
+</section>

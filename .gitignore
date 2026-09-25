@@ -9,3 +9,9 @@ dist/
 
 # generated protobuf code
 src/gen/
+
+*.binpb
+*.pb
+
+.camunda/
+

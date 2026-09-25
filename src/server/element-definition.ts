@@ -1,4 +1,5 @@
 import { BpmnModdle } from "bpmn-moddle";
+import { inputMappings, methodOf, moddleOptions } from "../engine/bpmn-extensions.js";
 
 /** What the BPMN says about one element: the static half of the inspector. */
 export interface ElementDefinition {
@@ -7,6 +8,8 @@ export interface ElementDefinition {
   readonly name: string | undefined;
   readonly documentation: string[];
   readonly script: Expression | undefined;
+  /** For a service task: the Connect/gRPC method it calls, and its inputs. */
+  readonly call: { readonly method: string; readonly inputs: [string, string][] } | undefined;
   /** For a sequence flow: its own condition, ends, and whether it is the default. */
   readonly flow: FlowInfo | undefined;
   /** Where the element can go next — the interesting part of a gateway. */
@@ -17,7 +20,7 @@ export interface ElementDefinition {
   readonly loop: Detail | undefined;
   /** Core settings worth showing (implementation, calledElement, …). */
   readonly properties: [string, string][];
-  /** Extension attributes, e.g. `camunda:formKey`. */
+  /** Extension attributes, e.g. `zeebe:modelerTemplate`. */
   readonly attributes: [string, string][];
 }
 
@@ -92,7 +95,7 @@ const models = new Map<string, Promise<Record<string, Node>>>();
 function parse(definitionId: string, source: string): Promise<Record<string, Node>> {
   let model = models.get(definitionId);
   if (model === undefined) {
-    model = new BpmnModdle()
+    model = new BpmnModdle(moddleOptions)
       .fromXML(source)
       .then((result) => result.elementsById as unknown as Record<string, Node>);
     model.catch(() => models.delete(definitionId));
@@ -171,6 +174,17 @@ export async function describeElement(
       ? { language: node["scriptFormat"] as string | undefined, body: node["script"].trim() }
       : undefined;
 
+  const method = methodOf(node as { method?: unknown; extensionElements?: unknown });
+  const call =
+    method === undefined
+      ? undefined
+      : {
+          method,
+          inputs: inputMappings(node["extensionElements"]).map(
+            (input): [string, string] => [input.target, input.source],
+          ),
+        };
+
   const events = ((node["eventDefinitions"] as Node[] | undefined) ?? []).map((def) => ({
     type: bare(def.$type),
     fields: fields(def),
@@ -191,6 +205,26 @@ export async function describeElement(
   const attributes = Object.entries(node.$attrs ?? {}).filter(
     ([key]) => key !== "xmlns" && !key.startsWith("xmlns:"),
   );
+  // Extension properties moddle knows the schema of (zeebe:modelerTemplate, …)
+  // are typed properties, not $attrs; list the ones the XML sets. Own
+  // properties only: a schema default was never written by the author.
+  const descriptor = (
+    node as {
+      $descriptor?: { properties?: { name: string; ns?: { name?: string; prefix?: string; localName?: string } }[] };
+    }
+  ).$descriptor;
+  for (const prop of descriptor?.properties ?? []) {
+    const prefix = prop.ns?.prefix;
+    const qualified = prop.ns?.name ?? prop.name;
+    // The template icon is a long data: URI; the diagram already shows it.
+    if (prefix === undefined || prefix === "bpmn" || qualified === "zeebe:modelerTemplateIcon") continue;
+    const local = prop.ns?.localName ?? prop.name;
+    if (!Object.prototype.hasOwnProperty.call(node, local)) continue;
+    const value = node[local];
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+      attributes.push([qualified, String(value)]);
+    }
+  }
 
   return {
     id: elementId,
@@ -198,6 +232,7 @@ export async function describeElement(
     name: node.name,
     documentation,
     script,
+    call,
     flow: node.$type === "bpmn:SequenceFlow" ? flowInfo(node) : undefined,
     outgoing,
     events,
@@ -205,4 +240,16 @@ export async function describeElement(
     properties,
     attributes,
   };
+}
+
+/** Every service task of a definition and the method it calls, by element id. */
+export async function serviceTaskMethods(definitionId: string, source: string): Promise<Record<string, string>> {
+  const byId = await parse(definitionId, source);
+  const methods: Record<string, string> = {};
+  for (const [id, node] of Object.entries(byId)) {
+    if (node.$type !== "bpmn:ServiceTask") continue;
+    const method = methodOf(node as { method?: unknown; extensionElements?: unknown });
+    if (method !== undefined) methods[id] = method;
+  }
+  return methods;
 }

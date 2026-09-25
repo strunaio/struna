@@ -12,6 +12,8 @@ export interface ServeConfig {
   readonly worker: boolean;
   /** When set, Tick requires `Authorization: Bearer <tickToken>`. */
   readonly tickToken?: string | undefined;
+  /** Enables the RegistryService RPC, which then requires this bearer token. */
+  readonly adminToken?: string | undefined;
   /** Key fragments masked in the event log and the dashboard. */
   readonly redactKeys: readonly string[];
 }
@@ -51,12 +53,14 @@ function databaseUrl(override: string | undefined): string {
 
 export function serveConfig(overrides: Partial<ServeConfig> = {}): ServeConfig {
   const tickToken = overrides.tickToken ?? process.env["STRUNA_TICK_TOKEN"];
+  const adminToken = overrides.adminToken ?? process.env["STRUNA_ADMIN_TOKEN"];
   return {
     host: overrides.host ?? process.env["HOST"] ?? "127.0.0.1",
     port: overrides.port ?? intFromEnv("PORT", 8080),
     databaseUrl: databaseUrl(overrides.databaseUrl),
     worker: overrides.worker ?? false,
     tickToken: tickToken === "" ? undefined : tickToken,
+    adminToken: adminToken === "" ? undefined : adminToken,
     redactKeys: overrides.redactKeys ?? parseRedactKeys(process.env["STRUNA_REDACT_KEYS"]),
   };
 }

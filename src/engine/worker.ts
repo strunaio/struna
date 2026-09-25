@@ -6,8 +6,11 @@ import { Engine, type BpmnEngineExecutionState } from "bpmn-engine";
 import { Timers } from "bpmn-elements";
 import type { PrismaClient } from "../db/client.js";
 import { Prisma } from "../gen/prisma/client.js";
+import { inputMappings, inputValue, methodOf, moddleOptions } from "./bpmn-extensions.js";
 import { waitingActivities } from "./event-feed.js";
 import { DEFAULT_PAYLOAD_POLICY, sanitize, type PayloadPolicy } from "./payload.js";
+import { ServiceRegistry } from "./registry.js";
+import { callMethod } from "./service-call.js";
 import type { InstanceStatus } from "./process-engine.js";
 
 /** Engine events worth persisting; the engine emits far more than this. */
@@ -41,6 +44,8 @@ export interface WorkerOptions {
   readonly runTimeoutMs?: number;
   /** Masking and size cap for data written to the event log. */
   readonly payloadPolicy?: PayloadPolicy;
+  /** Where service tasks' methods are looked up; one per worker by default. */
+  readonly registry?: ServiceRegistry;
 }
 
 export interface TickOptions {
@@ -143,41 +148,100 @@ function deferredTimers(): Timers {
 
 interface ActivityLike {
   readonly id: string;
-  readonly environment: { readonly variables: Record<string, unknown> };
+  readonly type: string;
+  readonly environment: {
+    readonly variables: Record<string, unknown>;
+    resolveExpression(expression: string, message?: unknown): unknown;
+  };
+  readonly behaviour: {
+    method?: string;
+    extensionElements?: unknown;
+    Service?: unknown;
+  };
   on(event: string, handler: (api: { content?: { output?: unknown } }) => void, options?: { consumerTag?: string }): void;
   readonly broker: { cancel(consumerTag: string): void };
 }
 
-/**
- * bpmn-engine extension: when a task ends, keep its result — the payload it
- * was signalled with, or what a script passed to `next(null, …)` — in the
- * process variables under the task's id. bpmn-engine itself hands a result
- * only to the flows leaving that task; this makes an approval readable by the
- * gateway after it (`environment.variables.review.approved`), by later tasks,
- * and in the inspector.
- */
+/** Calls a service task's method; the run supplies it, with its instance id. */
+type ServiceCaller = (
+  method: string,
+  params: Record<string, unknown>,
+  elementId: string,
+) => Promise<Record<string, unknown>>;
+
 const TASK_RESULTS_TAG = "_struna-task-results";
-const extensions = {
-  taskResults(activity: ActivityLike) {
-    return {
-      activate() {
-        activity.on(
-          "end",
-          (api) => {
-            const output = api?.content?.output;
-            if (output !== undefined && output !== null) {
-              activity.environment.variables[activity.id] = output;
+
+/** bpmn-engine extensions for one run. */
+function engineExtensions(callService: ServiceCaller) {
+  return {
+    /**
+     * When a task ends, keep its result — the payload it was signalled with,
+     * a script's `next(null, …)`, a service's response — in the process
+     * variables under the task's id. bpmn-engine itself hands a result only
+     * to the flows leaving that task; this makes an approval readable by the
+     * gateway after it (`environment.variables.review.approved`), by later
+     * tasks, and in the inspector.
+     */
+    taskResults(activity: ActivityLike) {
+      // The process itself is not a task; its "result" is empty.
+      if (activity.type === "bpmn:Process") return undefined;
+      return {
+        activate() {
+          activity.on(
+            "end",
+            (api) => {
+              const output = api?.content?.output;
+              if (output !== undefined && output !== null) {
+                activity.environment.variables[activity.id] = output;
+              }
+            },
+            { consumerTag: TASK_RESULTS_TAG },
+          );
+        },
+        deactivate() {
+          activity.broker.cancel(TASK_RESULTS_TAG);
+        },
+      };
+    },
+
+    /**
+     * A service task calls the Connect/gRPC method named by its
+     * `zeebe:taskDefinition` type, found in the service registry. Its
+     * `zeebe:input`s make the request: FEEL (`=a + b`) evaluated against the
+     * instance's variables, or literals.
+     */
+    serviceTasks(activity: ActivityLike) {
+      if (activity.type !== "bpmn:ServiceTask") return undefined;
+      const method = methodOf(activity.behaviour);
+      if (method === undefined) return undefined;
+      const inputs = inputMappings(activity.behaviour.extensionElements);
+
+      activity.behaviour.Service = function StrunaServiceCall(this: unknown, running: ActivityLike) {
+        return {
+          execute(executionMessage: unknown, callback: (error: unknown, output?: unknown) => void) {
+            let input: Record<string, unknown>;
+            try {
+              input = Object.fromEntries(
+                inputs.map((mapping) => [
+                  mapping.target,
+                  inputValue(mapping.source, running.environment.variables),
+                ]),
+              );
+            } catch (cause) {
+              callback(cause);
+              return;
             }
+            callService(method, input, activity.id).then(
+              (output) => callback(null, output),
+              (cause: unknown) => callback(cause),
+            );
           },
-          { consumerTag: TASK_RESULTS_TAG },
-        );
-      },
-      deactivate() {
-        activity.broker.cancel(TASK_RESULTS_TAG);
-      },
-    };
-  },
-};
+        };
+      };
+      return undefined;
+    },
+  };
+}
 
 /**
  * Keys bpmn-elements copies from its run message into a process's variables;
@@ -250,6 +314,7 @@ export class Worker {
   readonly #leaseMs: number;
   readonly #runTimeoutMs: number;
   readonly #payloadPolicy: PayloadPolicy;
+  readonly #registry: ServiceRegistry;
 
   constructor(
     private readonly db: PrismaClient,
@@ -259,6 +324,7 @@ export class Worker {
     this.#leaseMs = options.leaseMs ?? 60_000;
     this.#runTimeoutMs = options.runTimeoutMs ?? 30_000;
     this.#payloadPolicy = options.payloadPolicy ?? DEFAULT_PAYLOAD_POLICY;
+    this.#registry = options.registry ?? new ServiceRegistry(db);
   }
 
   /** Run whatever is due now, within the given budget. */
@@ -332,7 +398,9 @@ export class Worker {
         orderBy: { id: "asc" },
       });
 
-      const run = new InstanceRun(this.db, id, this.#payloadPolicy);
+      const run = new InstanceRun(this.db, id, this.#payloadPolicy, async (method, params, elementId) =>
+        callMethod(await this.#registry.resolve(method), params, { instanceId: id, elementId }),
+      );
       let outcome: Outcome;
       try {
         outcome = await run.execute({
@@ -459,6 +527,7 @@ class InstanceRun {
     private readonly db: PrismaClient,
     private readonly instanceId: string,
     private readonly policy: PayloadPolicy,
+    private readonly callService: ServiceCaller,
   ) {}
 
   async execute(input: {
@@ -471,6 +540,7 @@ class InstanceRun {
   }): Promise<Outcome> {
     const deadline = Date.now() + input.runTimeoutMs;
     const listener = this.#listener();
+    const extensions = engineExtensions(this.callService);
 
     let engine: Engine;
     if (input.state === null) {
@@ -480,6 +550,7 @@ class InstanceRun {
         variables: input.variables,
         timers: deferredTimers(),
         extensions,
+        moddleOptions,
       });
       this.#watch(engine);
       await engine.execute({ listener });
@@ -487,7 +558,7 @@ class InstanceRun {
       const state = input.state as unknown as BpmnEngineExecutionState;
       // What the log last saw: the variables saved when it was parked.
       this.#loggedVariables = this.#snapshotKey(input.variables, {});
-      engine = new Engine({ timers: deferredTimers(), extensions }).recover(state);
+      engine = new Engine({ timers: deferredTimers(), extensions, moddleOptions }).recover(state);
       this.#watch(engine);
       this.#replayedWaits = new Set(await waitingActivities(this.db, this.instanceId));
       await engine.resume({ listener });

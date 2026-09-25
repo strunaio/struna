@@ -1,0 +1,57 @@
+syntax = "proto3";
+
+// A demo API: two services in one descriptor set, served by
+// examples/services/demo-server.ts and called by the tests.
+package acme.demo.v1;
+
+import "google/protobuf/struct.proto";
+
+service MathService {
+  rpc Add(AddRequest) returns (AddResponse) {}
+  // Always fails, to test error handling.
+  rpc Divide(DivideRequest) returns (DivideResponse) {}
+}
+
+service GreeterService {
+  rpc Greet(GreetRequest) returns (GreetResponse) {}
+  // Echoes its request back, to test nested and well-known types.
+  rpc Echo(EchoRequest) returns (EchoResponse) {}
+}
+
+message AddRequest {
+  int32 a = 1;
+  int32 b = 2;
+}
+message AddResponse {
+  int32 sum = 1;
+}
+
+message DivideRequest {
+  int32 a = 1;
+  int32 b = 2;
+}
+message DivideResponse {
+  double quotient = 1;
+}
+
+message GreetRequest {
+  string name = 1;
+  string locale = 2;
+}
+message GreetResponse {
+  string message = 1;
+}
+
+message EchoRequest {
+  Recipient recipient = 1;
+  repeated string tags = 2;
+  google.protobuf.Struct metadata = 3;
+  bool urgent = 4;
+}
+message Recipient {
+  string name = 1;
+  string email_address = 2;
+}
+message EchoResponse {
+  EchoRequest request = 1;
+}

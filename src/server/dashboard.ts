@@ -4,7 +4,9 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { ProcessEngine } from "../engine/process-engine.js";
 import { ProcessError } from "../engine/process-engine.js";
 import { diagramXml } from "./diagram.js";
-import { describeElement } from "./element-definition.js";
+import { describeElement, serviceTaskMethods } from "./element-definition.js";
+import { parseMethodPath } from "../engine/registry.js";
+import { describeFields } from "../engine/templates.js";
 import { VERSION } from "../version.js";
 import { render } from "./views.js";
 
@@ -59,7 +61,7 @@ interface DashboardContext {
   readonly worker: boolean;
 }
 
-type NavTab = "overview" | "definitions" | "instances" | "events";
+type NavTab = "overview" | "definitions" | "instances" | "services" | "events";
 
 /** Render a full page, giving the layout what its header needs. */
 function page(
@@ -147,6 +149,85 @@ async function instanceModel(engine: ProcessEngine, id: string) {
   return { instance, definition, progress, events, variables: engine.redact(instance.variables) };
 }
 
+/**
+ * The registered service's icon for each service task of a definition, so
+ * the diagram shows it even where no element template put one in the XML.
+ */
+async function serviceIcons(engine: ProcessEngine, definition: { id: string; source: string }) {
+  const methods = await serviceTaskMethods(definition.id, definition.source);
+  if (Object.keys(methods).length === 0) return {};
+  const icons = new Map((await engine.registry.list()).map((service) => [service.name, service.icon]));
+  const byElement: Record<string, string> = {};
+  for (const [elementId, method] of Object.entries(methods)) {
+    try {
+      const icon = icons.get(parseMethodPath(method).service);
+      if (icon !== undefined) byElement[elementId] = icon;
+    } catch {
+      // A malformed method has no service, hence no icon.
+    }
+  }
+  return byElement;
+}
+
+/** How many recent calls a service's page lists. */
+const RECENT_CALLS = 20;
+
+/** Every deployed definition's service tasks that call `serviceName`. */
+async function serviceUsage(engine: ProcessEngine, serviceName: string) {
+  const definitions = await engine.listDefinitions(1_000, 0);
+  const usage: { definition: (typeof definitions)[number]; tasks: { elementId: string; method: string }[] }[] = [];
+  for (const definition of definitions) {
+    const methods = await serviceTaskMethods(definition.id, definition.source);
+    const tasks = Object.entries(methods)
+      .filter(([, method]) => {
+        try {
+          return parseMethodPath(method).service === serviceName;
+        } catch {
+          return false;
+        }
+      })
+      .map(([elementId, method]) => ({ elementId, method }));
+    if (tasks.length > 0) usage.push({ definition, tasks });
+  }
+  return usage;
+}
+
+async function serviceModel(engine: ProcessEngine, name: string) {
+  const entry = (await engine.registry.describe()).find((d) => d.service.name === name);
+  if (entry === undefined) throw new ProcessError(`no service ${name} is registered`, "not_found");
+  const { service, desc } = entry;
+  const usage = await serviceUsage(engine, name);
+  const calls = await engine.recentTaskRuns(
+    usage.flatMap((u) => u.tasks.map((t) => ({ definitionId: u.definition.id, elementId: t.elementId }))),
+    RECENT_CALLS,
+  );
+  const definitions = new Map(usage.map((u) => [u.definition.id, u.definition]));
+  return {
+    service,
+    methods: desc.methods.map((method) => ({
+      name: method.name,
+      path: `${desc.typeName}/${method.name}`,
+      kind: method.methodKind,
+      input: method.input.typeName,
+      output: method.output.typeName,
+      fields: describeFields(method.input),
+      usedBy: usage.flatMap((u) =>
+        u.tasks
+          .filter((t) => t.method === `${desc.typeName}/${method.name}`)
+          .map((t) => ({ definition: u.definition, elementId: t.elementId })),
+      ),
+    })),
+    usage,
+    calls: calls.map((event) => ({
+      at: event.createdAt,
+      ok: event.type === "activity.end",
+      elementId: event.elementId,
+      instance: event.instance,
+      definition: definitions.get(event.instance.definitionId),
+    })),
+  };
+}
+
 async function renderInstance(engine: ProcessEngine, id: string): Promise<string> {
   return render("./_instance.eta", await instanceModel(engine, id));
 }
@@ -215,6 +296,25 @@ const ROUTES: Route[] = [
   },
   {
     method: "GET",
+    pattern: /^\/services$/,
+    async handle(ctx) {
+      const services = (await ctx.engine.registry.describe()).map(({ service, desc }) => ({
+        ...service,
+        callable: desc.methods.filter((m) => m.methodKind === "unary").length,
+      }));
+      page(ctx, "./services.eta", "services", { services, title: "Services · struna" });
+    },
+  },
+  {
+    method: "GET",
+    pattern: /^\/services\/(?<name>[^/]+)$/,
+    async handle(ctx, params) {
+      const model = await serviceModel(ctx.engine, params["name"] as string);
+      page(ctx, "./service.eta", "services", { ...model, title: `${model.service.title} · struna` });
+    },
+  },
+  {
+    method: "GET",
     pattern: /^\/events$/,
     async handle(ctx) {
       const events = await ctx.engine.recentEvents(EVENTS_PAGE_LIMIT);
@@ -239,6 +339,7 @@ const ROUTES: Route[] = [
       const definition = await ctx.engine.getDefinition(params["id"] as string);
       page(ctx, "./definition.eta", "definitions", {
         definition,
+        icons: await serviceIcons(ctx.engine, definition),
         title: `${definition.name} v${definition.version} · struna`,
       });
     },
@@ -262,6 +363,7 @@ const ROUTES: Route[] = [
       const model = await instanceModel(ctx.engine, params["id"] as string);
       page(ctx, "./instance.eta", "instances", {
         ...model,
+        icons: await serviceIcons(ctx.engine, model.definition),
         title: `${model.definition.name} · ${model.instance.id} · struna`,
       });
     },

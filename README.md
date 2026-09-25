@@ -102,12 +102,124 @@ dies mid-run, the next one repeats everything since the last save — service
 tasks should be idempotent. A run is also cut off after 30s (it is stopped,
 saved and retried on the next tick), which bounds a task that never returns.
 
+## Service tasks
+
+A service task calls a method of a Connect or gRPC service. struna needs no
+code for it: it learns the service from its protobuf descriptor set and calls
+the method dynamically.
+
+**1. Register services.** A registration is a descriptor set plus where its
+services run — every service in the set, or the ones you name:
+
+```bash
+buf build -o acme.binpb                     # imports included (the default)
+npx struna services add --descriptor acme.binpb --url https://acme-api.run.app
+npx struna services add --descriptor acme.binpb --url https://slack.run.app \
+  --service acme.slack.v1.ChatService --protocol grpc   # connect (default), grpc, grpcweb
+npx struna services list
+npx struna services remove acme.slack.v1.ChatService
+```
+
+A service is identified by its full proto name (the package makes it unique).
+Registering it again points it at the new descriptor set, URL or protocol, so
+moving a service never needs a redeploy. The same registry is available as
+the `struna.v1.RegistryService` RPC, which is off unless `STRUNA_ADMIN_TOKEN`
+is set and then requires `Authorization: Bearer <token>` — it decides which
+URLs struna calls.
+
+**2. Call a method from a service task.** struna reads BPMN the Camunda 8
+(Zeebe) way: the task definition type names the method, and `zeebe:input`s
+make the request:
+
+```xml
+<definitions … xmlns:zeebe="http://camunda.org/schema/zeebe/1.0">
+  …
+  <serviceTask id="notify" name="Tell the client">
+    <extensionElements>
+      <zeebe:taskDefinition type="acme.slack.v1.ChatService/PostMessage" />
+      <zeebe:ioMapping>
+        <zeebe:input source="#loc-de" target="channel" />
+        <zeebe:input source="=locale + &quot; is delivered&quot;" target="text" />
+        <zeebe:input source="=client.email" target="recipient.email" />
+      </zeebe:ioMapping>
+    </extensionElements>
+  </serviceTask>
+```
+
+- A source starting with `=` is FEEL (Camunda 8's expression language,
+  evaluated with [feelin](https://github.com/nikku/feelin)) over the
+  instance's variables: `=a + b`, `=add.sum`, `={sum: b}`. Anything else is a
+  literal.
+- A dotted target sets a nested field. Non-string fields take a FEEL value or
+  literal JSON: `42`, `true`, `["a","b"]`, `{"k":1}`. Proto and JSON field
+  names both work.
+- The response, as proto JSON, is the task's result: `variables.notify`.
+- Each call carries `struna-instance-id` and `struna-element-id` headers and a
+  25s timeout. A failed call fails the instance with the method and the
+  service's error code and message; a FEEL expression over a missing variable
+  fails it naming the expression. **Retry** calls it again.
+- Deploying checks every service task: a method must be named, registered and
+  unary, every input must be a field of its request, and FEEL must parse.
+  Register services before deploying the processes that call them.
+
+The inspector shows what a service task calls (linked to the service's page),
+its inputs, and each call's response. The **Services** tab lists the registry;
+a service's page shows its methods with the input targets and types a service
+task fills in, which definitions call them, and recent calls. It is read-only
+— the registry decides which URLs struna calls, so changes go through the CLI
+until the dashboard has a login. Only unary methods can be called.
+
+**3. Pick methods in your editor.** `struna templates export` writes Camunda 8
+element templates for every registered service to `.camunda/element-templates/`
+(one file per service, one template per method, grouped by service), which
+Camunda Modeler and the BPMN Modeler extension for VS Code read. In a
+Camunda 8 diagram, select a task, choose e.g. **Math › Add** as its template,
+and fill in the request fields — each takes a literal or, with a leading `=`,
+FEEL; blank fields write no input and keep their default. The template sets
+the task definition type to the method and puts the service's icon on the
+task. Re-run it after registering or changing services.
+
+Editors draw the icon only on tasks linked to a template (the
+`zeebe:modelerTemplate*` attributes picking one writes). For service tasks
+written by hand, link them without opening an editor:
+
+```bash
+npx struna templates apply examples/math-demo.bpmn   # in place; safe to repeat
+```
+
+`.camunda/` is only for editors — struna itself never reads it. Commit it so
+everyone gets the same templates, and re-export when services change.
+
+Icons belong to services, not methods. Set one with `--icon` on
+`services add`, or later:
+
+```bash
+npx struna services appearance acme.demo.v1.MathService --title "Calculator" --icon calc.svg
+npx struna services appearance acme.demo.v1.MathService --default-icon   # back to the monogram
+```
+
+Without one, a service gets a monogram tile (its initial, on a colour derived
+from its name). Editors show the icon on tasks made from a template
+(`zeebe:modelerTemplateIcon`); the dashboard draws it on every service task —
+the template's if the XML has one, otherwise the registered service's.
+
+**Try it** with the demo API in `examples/services/` (a `MathService` and a
+`GreeterService`, served without generated code) and `examples/math-demo.bpmn`:
+
+```bash
+npm run demo:services       # serves on :9000 and writes examples/services/demo.binpb
+npx struna services add --descriptor examples/services/demo.binpb --url http://localhost:9000
+# then deploy examples/math-demo.bpmn and start it with
+#   {"a": 30, "b": 12, "name": "world", "locale": "uk"}
+```
+
 ## Dashboard
 
 The dashboard is an htmx app with a header menu: **Overview** (everything at a
 glance), **Definitions** (each with a **Start** form, which takes you to the new
 instance), **Instances** (a **Signal** button for each activity one is parked
-on) and **Events** (the live engine feed over SSE). The header also shows
+on), **Services** (the registry, read-only) and **Events** (the live engine
+feed over SSE). The header also shows
 whether this server runs an embedded worker.
 
 Definition and instance names link to pages that draw the process with
@@ -118,7 +230,7 @@ log — finished, waiting, failed — and repainted live as the instance moves.
 The top half is what the BPMN says: documentation, a script task's script,
 a gateway's outgoing flows with their conditions (and which is the default),
 a flow's condition, timer/message/signal definitions, loop settings and
-extension attributes such as `camunda:*`. On an instance page, the inspector
+extension attributes such as `zeebe:*`. On an instance page, the inspector
 adds what happened: each time the element ran (a loop shows ×N on the shape),
 when it started, waited and ended, the signal payloads it received, its
 output, the instance's variables right after it finished, and how often each
@@ -150,6 +262,8 @@ Connect — same process, no client bundle, no second copy of the domain types.
 | `GET /` | overview: definitions, recent instances, live feed |
 | `GET /definitions` | definitions page; with `HX-Request`, just the table |
 | `GET /instances` | instances page; with `HX-Request`, just the table |
+| `GET /services` | registered services: icon, title, URL, protocol, methods |
+| `GET /services/:name` | one service: methods and their request fields, which definitions use them, recent calls |
 | `GET /events` | events page |
 | `GET /definitions/:id` | definition page with its diagram |
 | `GET /definitions/:id/diagram.bpmn` | BPMN XML with a layout, for bpmn-js |
@@ -200,11 +314,14 @@ and then follows it.
 
 ### Examples
 
+The examples are Camunda 8 flavoured (`xmlns:zeebe`, `modeler:executionPlatform`)
+so Camunda editors open them in the mode struna's templates target.
+
 | File | Shows |
 | --- | --- |
 | `examples/hello.bpmn` | one user task: start, signal, done |
 | `examples/video-render.bpmn` | agentic video render: agents (receive tasks) draft a script, a storyboard and a voiceover in parallel and render the cut; people (user tasks) approve the script with a revise loop, approve over-budget spend, investigate a render that runs over 2 hours (boundary timer), and sign off the release |
-| `examples/localization-qa.bpmn` | agentic localization QA for one target language (start one instance per locale): a QA tool and an MQM-style review agent score the translation; a triage script passes it, sends it to an auto-fix agent (at most `max_fix_rounds` times) or escalates to a linguist; a random `sample_rate` of passes gets a linguist spot check; a visual-QA agent checks screenshots; the client's in-country reviewer approves (reminded after 2 days by a non-interrupting timer), and an agent feeds corrections back into the TM and glossary |
+| `examples/math-demo.bpmn` | service tasks calling the demo Connect services: add two numbers, halve the sum (reading the previous step's result), branch on it, and greet in the start variable's language |
 
 In `video-render.bpmn`, every step's documentation says what to signal it
 with; an agent reports back exactly like a person does:
@@ -218,7 +335,7 @@ curl -sX POST $BASE/SignalInstance -H 'Content-Type: application/json' \
   -d '{"id":"<instance-id>","elementId":"review_script","payload":{"approved":true}}'
 ```
 
-`test/examples.test.ts` runs both end to end.
+`test/examples.test.ts` runs it end to end.
 
 ## Layout
 
@@ -241,6 +358,15 @@ src/server/element-definition.ts  what the BPMN says about one element (inspecto
 src/engine/process-engine.ts    API side: definitions, queue starts/signals
 src/engine/worker.ts            tick(): claim, run, save, release
 src/engine/event-feed.ts        tail of the event log for streams and SSE
+src/engine/registry.ts          service registry: descriptor sets and where services run
+src/engine/service-call.ts      dynamic Connect/gRPC calls for service tasks
+src/engine/templates.ts         element templates for editors, from the registry
+src/engine/icons.ts             service icons: files, defaults, monograms
+src/commands/templates.ts       `templates export` command
+src/engine/bpmn-extensions.ts   Zeebe BPMN extensions: task definition, inputs, FEEL
+src/commands/services.ts        `services` command
+src/server/registry-routes.ts   RegistryService implementation
+examples/services/              demo Connect API (proto + server) for service tasks
 src/engine/payload.ts           masking and size cap for logged/displayed data
 src/views/*.eta                 Eta templates (`_`-prefixed ones are fragments)
 src/gen/                        generated code (git-ignored, run `npm run gen`)
@@ -253,6 +379,7 @@ src/gen/                        generated code (git-ignored, run `npm run gen`)
 | `npm run dev` | `serve --worker` with reload on change |
 | `npm run serve` | `serve --worker` |
 | `npm run worker` | a standalone worker against `DATABASE_URL` |
+| `npm run demo:services` | the demo Connect services for service tasks, on :9000 |
 | `npm run build` | `tsc` (templates are read from `src/views` at runtime) |
 | `npm run typecheck` | type-check src, tests and configs |
 | `npm test` | Vitest against `struna_test` (rebuilt from the migrations each run; override with `TEST_DATABASE_URL`) |
