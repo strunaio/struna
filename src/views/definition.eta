@@ -11,5 +11,5 @@
   <span class="faint">Opens the new instance.</span>
 </div>
 
-<%~ include("./_diagram.eta", { definitionId: it.definition.id, legend: false }) %>
+<%~ include("./_diagram.eta", { definitionId: it.definition.id, legend: false, icons: it.icons }) %>
 <div id="element" aria-live="polite"></div>

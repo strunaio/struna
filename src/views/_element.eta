@@ -35,6 +35,16 @@
       <pre class="code"><%= el.script.body %></pre>
     <% } %>
 
+    <% if (el.call) { %>
+      <h4>Calls</h4>
+      <% var callService = el.call.method.split("/")[0], callMethod = el.call.method.split("/")[1] || ""; %>
+      <pre class="code"><a href="/services/<%= encodeURIComponent(callService) %>#method-<%= encodeURIComponent(callMethod) %>"><%= el.call.method %></a></pre>
+      <% if (el.call.inputs.length) { %>
+        <h4>Request</h4>
+        <dl class="times"><% el.call.inputs.forEach(function (p) { %><dt><%= p[0] %></dt><dd class="mono"><%= p[1] %></dd><% }) %></dl>
+      <% } %>
+    <% } %>
+
     <% if (isFlow) { %>
       <dl class="times">
         <dt>From</dt><dd><%= label(el.flow.source) %></dd>

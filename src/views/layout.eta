@@ -159,6 +159,24 @@
       .st-selected:not(.djs-connection) .djs-visual { filter: drop-shadow(0 0 3px var(--brand)) drop-shadow(0 0 1px var(--brand)); }
       /* bpmn-js focuses its canvas on click; the frame should not light up for that. */
       .canvas :focus, .canvas :focus-visible { outline: none; }
+      .service-icon { width: 20px; height: 20px; display: block; border-radius: 4px; pointer-events: none; }
+      .service-icon.inline { width: 24px; height: 24px; flex: none; }
+      .service-icon.large { width: 44px; height: 44px; border-radius: 9px; flex: none; }
+      .service-name { display: flex; align-items: center; gap: .6rem; text-decoration: none; }
+      .service-name > span > :first-child { text-decoration: underline; text-decoration-color: var(--line); }
+      .service-head { display: flex; align-items: center; gap: .9rem; margin-bottom: 1rem; }
+      .service-head h1 { margin: 0; }
+      .service-head .sub { margin: 0; }
+      .service-facts { padding: .7rem .8rem; margin: 0; }
+      .method { margin-bottom: .75rem; }
+      .method-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: .6rem; padding: .7rem .8rem 0; }
+      .method-types { padding: 0 .8rem; margin: .2rem 0 .5rem; font-size: .8rem; }
+      .method .empty { padding: 0 .8rem .8rem; }
+      table.fields { border-top: 1px solid var(--line); }
+      .used-by { padding: .5rem .8rem .7rem; margin: 0; font-size: .85rem; border-top: 1px solid var(--line); }
+      pre.manage { border: 0; }
+      /* A task's visual is its rect, the gear (paths) and its label (text); the icon takes the gear's place. */
+      .has-service-icon .djs-visual > path { display: none; }
       .run-count { font: 600 11px/1 ui-sans-serif, system-ui, sans-serif; color: #fff;
                    background: var(--brand); border-radius: 1rem; padding: .2rem .4rem; white-space: nowrap; }
 
@@ -196,7 +214,8 @@
           </a>
           <nav class="tabs" aria-label="Main">
             <% [["overview", "/", "Overview"], ["definitions", "/definitions", "Definitions"],
-                ["instances", "/instances", "Instances"], ["events", "/events", "Events"]].forEach(function (t) { %>
+                ["instances", "/instances", "Instances"], ["services", "/services", "Services"],
+                ["events", "/events", "Events"]].forEach(function (t) { %>
               <a class="tab" href="<%= t[1] %>"<% if (it.nav && it.nav.active === t[0]) { %> aria-current="page"<% } %>><%= t[2] %></a>
             <% }) %>
           </nav>

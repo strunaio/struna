@@ -3,17 +3,22 @@
              xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"
              xmlns:dc="http://www.omg.org/spec/DD/20100524/DC"
              xmlns:di="http://www.omg.org/spec/DD/20100524/DI"
-             xmlns:camunda="http://camunda.org/schema/1.0/bpmn"
+             xmlns:zeebe="http://camunda.org/schema/zeebe/1.0"
+             xmlns:modeler="http://camunda.org/schema/modeler/1.0"
+             modeler:executionPlatform="Camunda Cloud"
+             modeler:executionPlatformVersion="8.7.0"
              id="hello-definitions"
              targetNamespace="http://struna.io/bpmn">
-  <!-- camunda:historyTimeToLive only satisfies Camunda editors' lint; struna ignores it. -->
-  <process id="hello" isExecutable="true" camunda:historyTimeToLive="P30D">
+  <process id="hello" isExecutable="true">
     <startEvent id="start" name="Request received">
       <outgoing>to-review</outgoing>
     </startEvent>
     <sequenceFlow id="to-review" sourceRef="start" targetRef="review" />
     <!-- A user task waits for SignalInstance(elementId="review"). -->
     <userTask id="review" name="Review request">
+      <extensionElements>
+        <zeebe:userTask />
+      </extensionElements>
       <incoming>to-review</incoming>
       <outgoing>to-end</outgoing>
     </userTask>

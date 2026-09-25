@@ -1,8 +1,13 @@
+import type { DescField, DescMessage } from "@bufbuild/protobuf";
 import { BpmnModdle } from "bpmn-moddle";
 import type { PrismaClient } from "../db/client.js";
 import type { Prisma } from "../gen/prisma/client.js";
+import { ProcessError } from "./errors.js";
+import { evaluate } from "feelin";
+import { inputMappings, methodOf, moddleOptions } from "./bpmn-extensions.js";
 import { EventFeed, waitingActivities } from "./event-feed.js";
 import { DEFAULT_PAYLOAD_POLICY, redact, type PayloadPolicy } from "./payload.js";
+import { findField, ServiceRegistry } from "./registry.js";
 
 export type InstanceStatus = "pending" | "running" | "completed" | "failed" | "canceled";
 
@@ -20,15 +25,7 @@ function isUniqueViolation(cause: unknown): boolean {
   return (cause as { code?: unknown } | null)?.code === "P2002";
 }
 
-export class ProcessError extends Error {
-  constructor(
-    message: string,
-    readonly code: "not_found" | "invalid_argument" | "failed_precondition",
-  ) {
-    super(message);
-    this.name = "ProcessError";
-  }
-}
+export { ProcessError } from "./errors.js";
 
 /**
  * The API side of struna: stores definitions and records what should happen
@@ -61,15 +58,17 @@ export interface ElementRun {
 
 export class ProcessEngine {
   readonly events: EventFeed;
-  readonly #moddle = new BpmnModdle();
+  readonly registry: ServiceRegistry;
+  readonly #moddle = new BpmnModdle(moddleOptions);
   readonly #policy: PayloadPolicy;
 
   constructor(
     private readonly db: PrismaClient,
-    options: { readonly payloadPolicy?: PayloadPolicy } = {},
+    options: { readonly payloadPolicy?: PayloadPolicy; readonly registry?: ServiceRegistry } = {},
   ) {
     this.events = new EventFeed(db);
     this.#policy = options.payloadPolicy ?? DEFAULT_PAYLOAD_POLICY;
+    this.registry = options.registry ?? new ServiceRegistry(db);
   }
 
   /** Mask sensitive keys before data is shown; the API returns it as stored. */
@@ -86,14 +85,16 @@ export class ProcessEngine {
       // Keeps StartInstance's id-or-name lookup unambiguous.
       throw new ProcessError("name must not be a UUID", "invalid_argument");
     }
+    let elementsById: Record<string, unknown>;
     try {
-      await this.#moddle.fromXML(source);
+      ({ elementsById } = await this.#moddle.fromXML(source));
     } catch (cause) {
       throw new ProcessError(
         `invalid BPMN source: ${cause instanceof Error ? cause.message : String(cause)}`,
         "invalid_argument",
       );
     }
+    await this.#checkServiceTasks(elementsById);
 
     // Read the latest version, claim the next one. Two deploys of the same
     // name can read the same latest; the loser hits (name, version) and
@@ -110,6 +111,62 @@ export class ProcessEngine {
         });
       } catch (cause) {
         if (!isUniqueViolation(cause) || attempt >= DEPLOY_ATTEMPTS) throw cause;
+      }
+    }
+  }
+
+  /**
+   * Fail the deploy, not a run halfway through, when a service task cannot
+   * work: no method, a method nobody registered, an input that is not a field
+   * of its request, or FEEL that does not parse.
+   */
+  async #checkServiceTasks(elementsById: Record<string, unknown>): Promise<void> {
+    for (const element of Object.values(elementsById)) {
+      const task = element as { $type?: string; id?: string; method?: string; extensionElements?: unknown };
+      if (task.$type !== "bpmn:ServiceTask") continue;
+      const method = methodOf(task);
+      if (method === undefined) {
+        throw new ProcessError(
+          `service task ${task.id}: set <zeebe:taskDefinition type="package.Service/Method" /> — struna runs service tasks by calling a registered method`,
+          "invalid_argument",
+        );
+      }
+      let resolved;
+      try {
+        resolved = await this.registry.resolve(method);
+      } catch (cause) {
+        throw new ProcessError(
+          `service task ${task.id}: ${cause instanceof Error ? cause.message : String(cause)}`,
+          "invalid_argument",
+        );
+      }
+      for (const input of inputMappings(task.extensionElements)) {
+        if (input.source.startsWith("=")) {
+          // FEEL has no side effects: evaluating against nothing only checks the
+          // syntax (missing variables are warnings, not errors).
+          try {
+            evaluate(input.source.slice(1), {});
+          } catch (cause) {
+            throw new ProcessError(
+              `service task ${task.id}: input "${input.target}" is not valid FEEL: ${
+                cause instanceof Error ? cause.message : String(cause)
+              }`,
+              "invalid_argument",
+            );
+          }
+        }
+        let message: DescMessage | undefined = resolved.method.input;
+        for (const segment of input.target.split(".")) {
+          const field: DescField | undefined =
+            message === undefined ? undefined : findField(message, segment);
+          if (field === undefined) {
+            throw new ProcessError(
+              `service task ${task.id}: ${resolved.method.input.typeName} has no field "${input.target}"`,
+              "invalid_argument",
+            );
+          }
+          message = field.fieldKind === "message" ? field.message : undefined;
+        }
       }
     }
   }
@@ -143,6 +200,23 @@ export class ProcessEngine {
       throw new ProcessError(`no definition ${id}`, "not_found");
     }
     return definition;
+  }
+
+  /**
+   * The latest finished runs of the given tasks (definition + element), newest
+   * first: what a service's page lists as its recent calls.
+   */
+  recentTaskRuns(tasks: readonly { definitionId: string; elementId: string }[], take: number) {
+    if (tasks.length === 0) return Promise.resolve([]);
+    return this.db.processEvent.findMany({
+      where: {
+        type: { in: ["activity.end", "activity.error"] },
+        OR: tasks.map((task) => ({ elementId: task.elementId, instance: { definitionId: task.definitionId } })),
+      },
+      orderBy: { id: "desc" },
+      take,
+      include: { instance: { select: { id: true, status: true, definitionId: true } } },
+    });
   }
 
   /** Element ids the instance is currently parked on. */

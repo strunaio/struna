@@ -7,6 +7,7 @@
     "dev": "tsx watch src/cli.ts serve --worker",
     "serve": "tsx src/cli.ts serve --worker",
     "worker": "tsx src/cli.ts worker",
+    "demo:services": "tsx examples/services/demo-server.ts",
     "start": "node dist/cli.js serve",
     "gen": "npm run gen:proto && npm run gen:prisma",
     "gen:proto": "buf generate",
@@ -34,8 +35,10 @@
     "bpmn-moddle": "^10.3.1",
     "commander": "^15.0.0",
     "eta": "^4.6.0",
+    "feelin": "^8.2.0",
     "htmx-ext-sse": "^2.2.4",
-    "htmx.org": "^2.0.11"
+    "htmx.org": "^2.0.11",
+    "zeebe-bpmn-moddle": "^2.0.0"
   },
   "devDependencies": {
     "@bufbuild/buf": "^1.73.0",
@@ -45,7 +48,7 @@
     "prisma": "^7.10.0",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
-    "vitest": "^5.0.1"
+    "vitest": "^5.0.2"
   },
   "allowScripts": {
     "@bufbuild/buf@1.73.0": true,

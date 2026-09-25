@@ -11,7 +11,8 @@
 %>
 <div id="canvas" class="canvas inspectable"
      data-src="/definitions/<%= encodeURIComponent(it.definitionId) %>/diagram.bpmn"
-     data-inspect="<%= inspect %>"></div>
+     data-inspect="<%= inspect %>"
+     data-icons="<%= JSON.stringify(it.icons || {}) %>"></div>
 <% if (it.legend) { %>
 <p class="legend">
   <span class="done">done</span><span class="waiting">waiting</span><span class="failed">failed</span>
@@ -35,7 +36,30 @@
         return res.text();
       })
       .then(function (xml) { return viewer.importXML(xml); })
-      .then(function () { viewer.get("canvas").zoom("fit-viewport", "auto"); });
+      .then(function () {
+        viewer.get("canvas").zoom("fit-viewport", "auto");
+        drawIcons();
+      });
+
+    // Service icons: the element template's (in the XML), else the registered
+    // service's. The icon replaces the task's gear marker, which is hidden.
+    function drawIcons() {
+      var fromRegistry = JSON.parse(container.dataset.icons || "{}");
+      var overlays = viewer.get("overlays");
+      var canvas = viewer.get("canvas");
+      viewer.get("elementRegistry").forEach(function (element) {
+        if (element.type !== "bpmn:ServiceTask" && element.type !== "bpmn:Task") return;
+        var attrs = (element.businessObject && element.businessObject.$attrs) || {};
+        var src = attrs["zeebe:modelerTemplateIcon"] || fromRegistry[element.id];
+        if (!src) return;
+        var img = document.createElement("img");
+        img.className = "service-icon";
+        img.alt = "";
+        img.src = src;
+        canvas.addMarker(element.id, "has-service-icon");
+        overlays.add(element.id, { position: { top: 4, left: 4 }, html: img });
+      });
+    }
 
     function paint() {
       var source = document.querySelector("[data-progress]");

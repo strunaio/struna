@@ -7,6 +7,7 @@ import { DEFAULT_MAX_PAYLOAD_BYTES, parseRedactKeys } from "../engine/payload.js
 import { Worker, runWorker } from "../engine/worker.js";
 import { processRoutes } from "./routes.js";
 import { handleDashboard } from "./dashboard.js";
+import { registryRoutes } from "./registry-routes.js";
 import { workerRoutes } from "./worker-routes.js";
 
 type Fallback = NonNullable<
@@ -38,12 +39,14 @@ export async function startServer(
     maxBytes: DEFAULT_MAX_PAYLOAD_BYTES,
   };
   const engine = new ProcessEngine(db, { payloadPolicy });
-  const worker = new Worker(db, { payloadPolicy });
+  // One registry, so the worker sees services the API has just registered.
+  const worker = new Worker(db, { payloadPolicy, registry: engine.registry });
 
   const handler = connectNodeAdapter({
     routes: (router) => {
       processRoutes(engine)(router);
       workerRoutes(worker, config.tickToken)(router);
+      registryRoutes(engine.registry, config.adminToken)(router);
     },
     // Anything that is not an RPC path is the htmx dashboard. connect-node
     // types `fallback` for both HTTP/1.1 and HTTP/2; this listener is created

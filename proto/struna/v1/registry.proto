@@ -1,0 +1,62 @@
+syntax = "proto3";
+
+package struna.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// RegistryService manages the Connect/gRPC services struna can call from
+// service tasks. It decides which URLs struna calls, so it is disabled unless
+// STRUNA_ADMIN_TOKEN is set, and then requires `Authorization: Bearer <token>`.
+service RegistryService {
+  // Register the services in a descriptor set at a base URL. Registering a
+  // service again points it at the new descriptor set, URL and protocol.
+  rpc AddServices(AddServicesRequest) returns (AddServicesResponse) {}
+  rpc ListServices(ListServicesRequest) returns (ListServicesResponse) {}
+  rpc RemoveService(RemoveServiceRequest) returns (RemoveServiceResponse) {}
+}
+
+message AddServicesRequest {
+  // A serialized google.protobuf.FileDescriptorSet, imports included:
+  // `buf build -o set.binpb`.
+  bytes descriptor_set = 1;
+  // Where the services run, e.g. https://acme-api.run.app
+  string base_url = 2;
+  // Register only these services (full names). Empty registers every service
+  // in the set.
+  repeated string services = 3;
+  // "connect" (the default), "grpc" or "grpcweb".
+  string protocol = 4;
+}
+message AddServicesResponse {
+  repeated RegisteredService services = 1;
+}
+
+message ListServicesRequest {}
+message ListServicesResponse {
+  repeated RegisteredService services = 1;
+}
+
+message RemoveServiceRequest {
+  // Full service name, e.g. acme.slack.v1.ChatService
+  string name = 1;
+}
+message RemoveServiceResponse {}
+
+message RegisteredService {
+  string name = 1;
+  string base_url = 2;
+  string protocol = 3;
+  repeated ServiceMethod methods = 4;
+  google.protobuf.Timestamp updated_at = 5;
+}
+
+message ServiceMethod {
+  string name = 1;
+  // What a service task names: package.Service/Method
+  string path = 2;
+  string input_type = 3;
+  string output_type = 4;
+  // "unary", "server_streaming", "client_streaming" or "bidi_streaming";
+  // service tasks call unary methods.
+  string kind = 5;
+}
