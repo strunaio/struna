@@ -73,3 +73,18 @@ export function sanitize(value: unknown, policy: PayloadPolicy): Prisma.InputJso
   // A bare null is not an InputJsonValue; the log stores "nothing" as {}.
   return (clean ?? {}) as Prisma.InputJsonValue;
 }
+
+/** Whether a key or dotted path names something to mask. */
+export function isSensitiveKey(key: string, policy: PayloadPolicy): boolean {
+  const fragments = policy.redactKeys.map(normalize).filter((f) => f !== "");
+  return key.split(".").some((segment) => fragments.some((f) => normalize(segment).includes(f)));
+}
+
+/**
+ * Mapping rows (`{target, source, value}`) with values masked where the
+ * target is sensitive: masking by key alone would miss them, since the value
+ * sits under "value", not under "password".
+ */
+export function maskMappings<T extends { target: string; value: unknown }>(rows: readonly T[], policy: PayloadPolicy): T[] {
+  return rows.map((row) => (isSensitiveKey(row.target, policy) ? { ...row, value: REDACTED } : row));
+}

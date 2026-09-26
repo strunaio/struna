@@ -1,0 +1,14 @@
+<%/* Evaluated input or output mappings, as Operate lists them: where each
+     value went, the expression it came from, and what it was. */%>
+<table class="mappings">
+  <thead><tr><th>Target</th><th>Source</th><th>Value</th></tr></thead>
+  <tbody>
+    <% it.rows.forEach(function (row) { %>
+      <tr>
+        <td><code><%= row.target %></code></td>
+        <td><code class="faint"><%= row.source %></code></td>
+        <td><code><%= JSON.stringify(row.value) %></code></td>
+      </tr>
+    <% }) %>
+  </tbody>
+</table>

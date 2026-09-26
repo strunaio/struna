@@ -24,7 +24,6 @@ const CSS = "text/css; charset=utf-8";
 /** Client libraries are served straight from the installed packages. */
 const ASSETS: Record<string, { specifier: string; type: string }> = {
   "/static/htmx.js": { specifier: "htmx.org/dist/htmx.min.js", type: JS },
-  "/static/sse.js": { specifier: "htmx-ext-sse/dist/sse.js", type: JS },
   "/static/bpmn-viewer.js": {
     specifier: "bpmn-js/dist/bpmn-navigated-viewer.production.min.js",
     type: JS,
@@ -272,7 +271,7 @@ const ROUTES: Route[] = [
         ...definitions,
         ...instances,
         events,
-        title: "struna",
+        title: "Struna",
       });
     },
   },
@@ -282,7 +281,7 @@ const ROUTES: Route[] = [
     async handle(ctx) {
       const model = await definitionsModel(ctx.engine, LIST_LIMIT);
       if (wantsFragment(ctx.req)) return html(ctx.res, render("./_definitions.eta", model));
-      page(ctx, "./definitions.eta", "definitions", { ...model, title: "Definitions · struna" });
+      page(ctx, "./definitions.eta", "definitions", { ...model, title: "Definitions · Struna" });
     },
   },
   {
@@ -291,7 +290,7 @@ const ROUTES: Route[] = [
     async handle(ctx) {
       const model = await instancesModel(ctx.engine, LIST_LIMIT);
       if (wantsFragment(ctx.req)) return html(ctx.res, render("./_instances.eta", model));
-      page(ctx, "./instances.eta", "instances", { ...model, title: "Instances · struna" });
+      page(ctx, "./instances.eta", "instances", { ...model, title: "Instances · Struna" });
     },
   },
   {
@@ -302,7 +301,7 @@ const ROUTES: Route[] = [
         ...service,
         callable: desc.methods.filter((m) => m.methodKind === "unary").length,
       }));
-      page(ctx, "./services.eta", "services", { services, title: "Services · struna" });
+      page(ctx, "./services.eta", "services", { services, title: "Services · Struna" });
     },
   },
   {
@@ -310,7 +309,7 @@ const ROUTES: Route[] = [
     pattern: /^\/services\/(?<name>[^/]+)$/,
     async handle(ctx, params) {
       const model = await serviceModel(ctx.engine, params["name"] as string);
-      page(ctx, "./service.eta", "services", { ...model, title: `${model.service.title} · struna` });
+      page(ctx, "./service.eta", "services", { ...model, title: `${model.service.title} · Struna` });
     },
   },
   {
@@ -318,7 +317,7 @@ const ROUTES: Route[] = [
     pattern: /^\/events$/,
     async handle(ctx) {
       const events = await ctx.engine.recentEvents(EVENTS_PAGE_LIMIT);
-      page(ctx, "./events.eta", "events", { events, title: "Events · struna" });
+      page(ctx, "./events.eta", "events", { events, title: "Events · Struna" });
     },
   },
   {
@@ -340,7 +339,7 @@ const ROUTES: Route[] = [
       page(ctx, "./definition.eta", "definitions", {
         definition,
         icons: await serviceIcons(ctx.engine, definition),
-        title: `${definition.name} v${definition.version} · struna`,
+        title: `${definition.name} v${definition.version} · Struna`,
       });
     },
   },
@@ -364,7 +363,7 @@ const ROUTES: Route[] = [
       page(ctx, "./instance.eta", "instances", {
         ...model,
         icons: await serviceIcons(ctx.engine, model.definition),
-        title: `${model.definition.name} · ${model.instance.id} · struna`,
+        title: `${model.definition.name} · ${model.instance.id} · Struna`,
       });
     },
   },
@@ -468,16 +467,21 @@ const ROUTES: Route[] = [
     method: "GET",
     pattern: /^\/events\/stream$/,
     async handle({ engine, req, res }) {
-      // Take the cursor before announcing the stream, so nothing the client
+      // A tab coming back resumes where it left off (`?after=`, or the
+      // browser's own Last-Event-ID on reconnect). A new one starts now: take
+      // the cursor before announcing the stream, so nothing the client
       // triggers after connecting can land before it.
-      const after = await engine.events.latestSeq();
+      const resumeFrom = new URL(req.url ?? "/", "http://localhost").searchParams.get("after") ?? req.headers["last-event-id"];
+      const after =
+        typeof resumeFrom === "string" && /^\d{1,19}$/.test(resumeFrom) ? BigInt(resumeFrom) : await engine.events.latestSeq();
       res.writeHead(200, {
         "content-type": "text/event-stream",
         "cache-control": "no-cache",
         connection: "keep-alive",
       });
-      // Defeat proxy buffering so the first event is not held back.
-      res.write(": connected\n\n");
+      // Where this stream starts, so a client that closes it before any event
+      // can still resume from here. Also defeats proxy buffering.
+      res.write(`event: hello\ndata: ${after}\n\n`);
 
       const abort = new AbortController();
       req.on("close", () => abort.abort());
@@ -490,7 +494,7 @@ const ROUTES: Route[] = [
           const fragment = render("./_event.eta", { event });
           // SSE frames are newline-delimited, so the HTML must not contain raw
           // newlines of its own.
-          res.write(`event: engine\ndata: ${fragment.replace(/\n/g, " ")}\n\n`);
+          res.write(`id: ${event.seq}\nevent: engine\ndata: ${fragment.replace(/\n/g, " ")}\n\n`);
         }
       } finally {
         res.end();
@@ -499,7 +503,7 @@ const ROUTES: Route[] = [
   },
   {
     method: "GET",
-    pattern: /^\/healthz$/,
+    pattern: /^\/health$/,
     handle({ res }) {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ status: "ok" }));

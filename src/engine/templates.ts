@@ -18,11 +18,18 @@ interface TemplateProperty {
   readonly value?: string;
   readonly choices?: { name: string; value: string }[];
   readonly group?: string;
-  /** Lets the field hold a literal or, with a leading "=", FEEL. */
-  readonly feel?: "optional";
+  /** "optional": a literal or, with a leading "=", FEEL; "required": always FEEL. */
+  readonly feel?: "optional" | "required";
   /** A blank field writes no input at all. */
   readonly optional?: boolean;
-  readonly binding: { readonly type: string; readonly name?: string; readonly property?: string };
+  readonly binding: {
+    readonly type: string;
+    readonly name?: string;
+    readonly property?: string;
+    readonly key?: string;
+    /** For a `zeebe:output` binding: the FEEL the mapping reads. */
+    readonly source?: string;
+  };
 }
 
 export interface ElementTemplate {
@@ -45,12 +52,15 @@ const JSON_STRINGS = new Set(["google.protobuf.Timestamp", "google.protobuf.Dura
 /** How deep nested messages are flattened into dotted fields. */
 const MAX_DEPTH = 3;
 
-const HINT = 'A value, or FEEL starting with "=" (e.g. =order.total).';
-
 /** "SendMessage" → "Send message". */
 function humanize(name: string): string {
   const words = name.replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/_/g, " ");
   return words.charAt(0).toUpperCase() + words.slice(1).toLowerCase();
+}
+
+/** A field's label, as connectors word them: "recipient.email_address" → "Recipient › Email address". */
+function fieldLabel(path: string): string {
+  return path.split(".").map(humanize).join(" › ");
 }
 
 function typeName(field: DescField): string {
@@ -82,8 +92,8 @@ function requestFields(message: DescMessage, prefix = "", depth = 0): TemplatePr
 
     if (field.fieldKind === "enum") {
       out.push({
-        label: target,
-        description: field.enum.typeName,
+        label: fieldLabel(target),
+        description: `${field.enum.typeName} · ${target}`,
         type: "Dropdown",
         choices: field.enum.values.map((v) => ({ name: v.name, value: v.name })),
         value: field.enum.values[0]?.name ?? "",
@@ -97,9 +107,11 @@ function requestFields(message: DescMessage, prefix = "", depth = 0): TemplatePr
       field.fieldKind === "list" ||
       field.fieldKind === "map" ||
       (field.fieldKind === "message" && !JSON_STRINGS.has(field.message.typeName));
+    // The type and the proto name; the editor's FEEL toggle already says a
+    // field may be an expression.
     out.push({
-      label: target,
-      description: `${typeName(field)}. ${multiline ? "A JSON value or a FEEL list/context. " : ""}${HINT}`,
+      label: fieldLabel(target),
+      description: `${typeName(field)} · ${target}${multiline ? " — JSON, or a FEEL list or context" : ""}`,
       type: multiline ? "Text" : "String",
       feel: "optional",
       optional: true,
@@ -108,6 +120,33 @@ function requestFields(message: DescMessage, prefix = "", depth = 0): TemplatePr
     });
   }
   return out;
+}
+
+/**
+ * One optional output mapping per response field: `=quotient` → the variable
+ * typed into the field. The editor matches a task's existing
+ * `<zeebe:output source="=quotient" …/>` to this field by its source.
+ */
+function responseFields(message: DescMessage): TemplateProperty[] {
+  return describeFields(message).map((field, index) => ({
+    label: `Map ${field.target} to`,
+    // The rule is said once, on the first field, rather than under every one.
+    description:
+      `${field.type} — variable name.` +
+      (index === 0 ? " Only filled-in mappings leave the step; response fields left blank are not kept." : ""),
+    type: "String",
+    optional: true,
+    group: "output",
+    binding: { type: "zeebe:output", source: `=${field.target}` },
+  }));
+}
+
+/** A result expression that fits the method: `={message: response.message}`. */
+function exampleExpression(message: DescMessage): string {
+  const first = describeFields(message)[0]?.target;
+  if (first === undefined) return "={result: response}";
+  const name = first.split(".").at(-1) as string;
+  return `={${name}: response.${first}}`;
 }
 
 /** Templates for every unary method of one service, all with its icon. */
@@ -127,11 +166,34 @@ export function serviceTemplates(service: RegisteredService, desc: DescService):
         appliesTo: ["bpmn:Task", "bpmn:ServiceTask"],
         elementType: { value: "bpmn:ServiceTask" },
         icon: { contents: service.icon },
-        groups: [{ id: "request", label: "Request" }],
+        groups: [
+          { id: "request", label: "Request" },
+          // As Camunda's connector templates name it.
+          { id: "output", label: "Output mapping" },
+        ],
         properties: [
           // The method struna calls, as the task's job type.
           { type: "Hidden", value: path, binding: { type: "zeebe:taskDefinition", property: "type" } },
           ...requestFields(method.input),
+          // Where the response goes, as with a Camunda connector: one output
+          // mapping per response field (the value is the variable to write),
+          // a result variable or a result expression. Nothing mapped, nothing kept.
+          ...responseFields(method.output),
+          {
+            label: "Result variable",
+            description: `Name of the variable to store the response (${method.output.typeName}) in. With output mappings filled in, it stays in the step unless one maps it.`,
+            type: "String",
+            group: "output",
+            binding: { type: "zeebe:taskHeader", key: "resultVariable" },
+          },
+          {
+            label: "Result expression",
+            description: `FEEL expression that maps the response into process variables, e.g. ${exampleExpression(method.output)}. With output mappings filled in, its entries stay in the step unless one maps them.`,
+            type: "Text",
+            feel: "required",
+            group: "output",
+            binding: { type: "zeebe:taskHeader", key: "resultExpression" },
+          },
         ],
       };
     });

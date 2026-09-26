@@ -142,4 +142,10 @@ test("counts and separates the runs of an element in a loop", async () => {
   expect(runs.map((run) => (run.variables as { variables: { n: number } }).variables.n)).toEqual([
     1, 2, 3,
   ]);
+  // Each run says what it changed, measured against the state just before it.
+  expect(runs.map((run) => run.changes)).toEqual([
+    [{ name: "n", kind: "added", after: 1 }],
+    [{ name: "n", kind: "changed", before: 1, after: 2 }],
+    [{ name: "n", kind: "changed", before: 2, after: 3 }],
+  ]);
 });

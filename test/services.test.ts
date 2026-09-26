@@ -85,15 +85,34 @@ async function drain(): Promise<void> {
  * A process of Zeebe service tasks: each calls `method` (its task definition
  * type) with `params` as `zeebe:input`s, target → source.
  */
-function callingProcess(id: string, tasks: { id: string; method?: string; params?: Record<string, string> }[]) {
+function callingProcess(
+  id: string,
+  tasks: {
+    id: string;
+    method?: string;
+    params?: Record<string, string>;
+    /** target → source, as `zeebe:output`s. */
+    outputs?: Record<string, string>;
+    resultVariable?: string;
+  }[],
+) {
   const flows: string[] = [];
   const nodes = tasks.map((task, i) => {
-    const params = Object.entries(task.params ?? {})
-      .map(([target, source]) => `<zeebe:input source="${source.replace(/"/g, "&quot;")}" target="${target}" />`)
-      .join("");
+    const params = [
+      ...Object.entries(task.params ?? {}).map(
+        ([target, source]) => `<zeebe:input source="${source.replace(/"/g, "&quot;")}" target="${target}" />`,
+      ),
+      ...Object.entries(task.outputs ?? {}).map(
+        ([target, source]) => `<zeebe:output source="${source}" target="${target}" />`,
+      ),
+    ].join("");
+    const headers =
+      task.resultVariable === undefined
+        ? ""
+        : `<zeebe:taskHeaders><zeebe:header key="resultVariable" value="${task.resultVariable}" /></zeebe:taskHeaders>`;
     flows.push(`<sequenceFlow id="f${i}" sourceRef="${i === 0 ? "start" : tasks[i - 1]!.id}" targetRef="${task.id}" />`);
     const definition = task.method === undefined ? "" : `<zeebe:taskDefinition type="${task.method}" />`;
-    return `<serviceTask id="${task.id}"><extensionElements>${definition}<zeebe:ioMapping>${params}</zeebe:ioMapping></extensionElements></serviceTask>`;
+    return `<serviceTask id="${task.id}"><extensionElements>${definition}${headers}<zeebe:ioMapping>${params}</zeebe:ioMapping></extensionElements></serviceTask>`;
   });
   flows.push(`<sequenceFlow id="fend" sourceRef="${tasks.at(-1)!.id}" targetRef="end" />`);
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -180,7 +199,7 @@ test("checks service tasks when a process is deployed", async () => {
 test("service tasks call registered methods; responses become task results", async () => {
   await engine.registry.add(descriptorSet, demo.url);
   const source = callingProcess("calls", [
-    { id: "add", method: "acme.demo.v1.MathService/Add", params: { a: "2", b: "=b" } },
+    { id: "add", method: "acme.demo.v1.MathService/Add", params: { a: "2", b: "=b" }, outputs: { total: "=sum" } },
     {
       id: "greet",
       method: "acme.demo.v1.GreeterService/Greet",
@@ -197,6 +216,7 @@ test("service tasks call registered methods; responses become task results", asy
         metadata: "={sum: b}",
         urgent: "true",
       },
+      resultVariable: "echoed",
     },
   ]);
   const { id } = await engine.deploy("calls", source);
@@ -206,10 +226,13 @@ test("service tasks call registered methods; responses become task results", asy
   const done = await engine.getInstance(instance.id);
   expect(done.error).toBeNull();
   expect(done.status).toBe("completed");
-  expect(done.variables).toMatchObject({
-    add: { sum: 42 },
-    greet: { message: "Hallo, Welt!" },
-    echo: {
+  // Like connectors: a response is kept only where mapped — add's sum as
+  // total, echo's whole response as echoed — and greet's, unmapped, is not.
+  expect(done.variables).toEqual({
+    b: 40,
+    who: "Welt",
+    total: 42,
+    echoed: {
       request: {
         recipient: { name: "Ann", emailAddress: "ann@example.com" },
         tags: ["loc", "de"],
@@ -218,6 +241,10 @@ test("service tasks call registered methods; responses become task results", asy
       },
     },
   });
+  // The unmapped response is still the step's recorded result.
+  const [greetRun] = await engine.elementRuns(instance.id, "greet");
+  expect(greetRun?.output).toEqual({ message: "Hallo, Welt!" });
+  expect(greetRun?.outputs).toEqual([]);
   // The service can tell which run and step called it.
   expect(demo.headers.at(-1)).toEqual({ instance: instance.id, element: "add" });
 });
@@ -283,6 +310,13 @@ test("the inspector shows what a service task calls and what came back", async (
       "inspected",
       callingProcess("inspected", [
         { id: "add", method: "acme.demo.v1.MathService/Add", params: { a: "2", b: "=b" } },
+        {
+          id: "both",
+          method: "acme.demo.v1.MathService/Add",
+          params: { a: "1", b: "=b" },
+          outputs: { total: "=sum" },
+          resultVariable: "whole",
+        },
       ]),
     );
     const instance = await engine.start(id, { b: 40 });
@@ -291,10 +325,47 @@ test("the inspector shows what a service task calls and what came back", async (
     const panel = await (await fetch(`${server.url}/instances/${instance.id}/elements/add`)).text();
     expect(panel).toContain("acme.demo.v1.MathService/Add");
     expect(panel).toContain("=b");
-    expect(panel).toMatch(/Output[\s\S]*&quot;sum&quot;: 42/);
+    expect(panel).toMatch(/Result[\s\S]*&quot;sum&quot;: 42/);
+    // Operate-style: each input mapping with the value it evaluated to.
+    expect(panel).toMatch(/Input mappings[\s\S]*<code>b<\/code>[\s\S]*=b[\s\S]*<code>40<\/code>/);
+    // Nothing mapped: the response is not kept, and the panel says why.
+    expect(panel).toMatch(/Output mappings<\/h4>\s*<p class="faint unmapped">None — like a Camunda connector/);
+    expect(panel).not.toContain("result.sum");
+
+    // With an output mapping, the result variable stays in the step, and the panel says so.
+    const both = await (await fetch(`${server.url}/instances/${instance.id}/elements/both`)).text();
+    expect(both).toMatch(/Output mappings<\/h4>[\s\S]*<code>total<\/code>[\s\S]*=sum[\s\S]*<code>41<\/code>/);
+    expect(both).toMatch(/Result variable <code>whole<\/code> holds the whole result — it stays in the step/);
   } finally {
     await server.close();
   }
+});
+
+test("a failed call repeats alone on retry: finished calls are not made again", async () => {
+  await engine.registry.add(descriptorSet, demo.url);
+  const { id } = await engine.deploy(
+    "checkpointed",
+    callingProcess("checkpointed", [
+      { id: "first", method: "acme.demo.v1.MathService/Add", params: { a: "1", b: "2" }, outputs: { one: "=sum" } },
+      { id: "second", method: "acme.demo.v1.MathService/Add", params: { a: "=one", b: "10" }, outputs: { two: "=sum" } },
+      // b = 0: the demo service refuses, so this step fails every time.
+      { id: "third", method: "acme.demo.v1.MathService/Divide", params: { a: "=two", b: "0" } },
+    ]),
+  );
+  const instance = await engine.start(id, {});
+  await drain();
+
+  const failed = await engine.getInstance(instance.id);
+  expect(failed.status).toBe("failed");
+  // Saved after the second call: what it wrote is kept, not thrown away with the run.
+  expect(failed.variables).toMatchObject({ one: 3, two: 13 });
+
+  await engine.retry(instance.id);
+  await drain();
+  expect((await engine.getInstance(instance.id)).status).toBe("failed");
+
+  const calls = demo.headers.filter((h) => h.instance === instance.id).map((h) => h.element);
+  expect(calls).toEqual(["first", "second"]);
 });
 
 test("examples/math-demo.bpmn runs against the demo services", async () => {
@@ -307,19 +378,23 @@ test("examples/math-demo.bpmn runs against the demo services", async () => {
 
   const done = await engine.getInstance(big.id);
   expect(done.status).toBe("completed");
+  // One of each Camunda 8 way: output mappings (sum, half), a resultVariable
+  // header (greeting), and a FEEL script's resultVariable (summary).
   expect(done.variables).toEqual({
     a: 30,
     b: 12,
     name: "Welt",
     locale: "de",
-    add: { sum: 42 },
-    halve: { quotient: 21 },
-    greet: { message: "Hallo, Welt!" },
+    sum: 42,
+    half: 21,
+    greeting: { message: "Hallo, Welt!" },
+    summary: "Hallo, Welt! 30 + 12 = 42, half of it is 21.",
   });
   // (1 + 2) / 2 = 1.5 is not over 10: no greeting.
   const skipped = await engine.getInstance(small.id);
   expect(skipped.status).toBe("completed");
-  expect(skipped.variables).not.toHaveProperty("greet");
+  expect(skipped.variables).not.toHaveProperty("greeting");
+  expect(skipped.variables).not.toHaveProperty("summary");
 });
 
 // --- Editor templates and icons -------------------------------------------
@@ -345,13 +420,41 @@ test("templates offer each method with the service's icon and its request fields
     value: "acme.demo.v1.MathService/Add",
     binding: { type: "zeebe:taskDefinition", property: "type" },
   });
-  expect(add.properties.slice(1).map((p) => [p.binding.type, p.binding.name, p.type, p.feel, p.optional])).toEqual([
+  const request = add.properties.filter((p) => p.group === "request");
+  expect(request.map((p) => [p.binding.type, p.binding.name, p.type, p.feel, p.optional])).toEqual([
     ["zeebe:input", "a", "String", "optional", true],
     ["zeebe:input", "b", "String", "optional", true],
   ]);
+  // Where the response goes, as Camunda's connector templates offer it.
+  // Where the response goes: an output mapping per response field (its value
+  // is the variable to write), then the connector-style result fields.
+  const output = add.properties.filter((p) => p.group === "output");
+  expect(output.map((p) => [p.label, p.binding.type, p.binding.source ?? p.binding.key, p.optional])).toEqual([
+    ["Map sum to", "zeebe:output", "=sum", true],
+    ["Result variable", "zeebe:taskHeader", "resultVariable", undefined],
+    ["Result expression", "zeebe:taskHeader", "resultExpression", undefined],
+  ]);
+  // Nested response fields are offered by their dotted path.
+  const echoOut = serviceTemplates(greeter.service, greeter.desc)
+    .find((t) => t.name === "Greeter › Echo")!
+    .properties.filter((p) => p.binding.type === "zeebe:output")
+    .map((p) => p.binding.source);
+  expect(echoOut).toContain("=request.recipient.email_address");
+
+  // Connector-style wording: readable labels, the proto name kept in the description.
+  expect(add.groups).toEqual([
+    { id: "request", label: "Request" },
+    { id: "output", label: "Output mapping" },
+  ]);
+  expect(request[0]).toMatchObject({ label: "A", description: "int32 · a" });
+  expect(output.find((p) => p.label === "Result expression")?.description).toContain("={sum: response.sum}");
 
   const echo = serviceTemplates(greeter.service, greeter.desc).find((t) => t.name === "Greeter › Echo")!;
-  expect(echo.properties.slice(1).map((p) => [p.binding.name, p.type])).toEqual([
+  expect(echo.properties.find((p) => p.binding.name === "recipient.email_address")).toMatchObject({
+    label: "Recipient › Email address",
+    description: "string · recipient.email_address",
+  });
+  expect(echo.properties.filter((p) => p.group === "request").map((p) => [p.binding.name, p.type])).toEqual([
     ["recipient.name", "String"],
     ["recipient.email_address", "String"],
     ["tags", "Text"],
@@ -418,6 +521,7 @@ test("a task set up from a template runs: FEEL and literals; a blank field write
         <zeebe:taskDefinition type="acme.demo.v1.MathService/Add" />
         <zeebe:ioMapping>
           <zeebe:input source="=x * 2" target="a" />
+          <zeebe:output source="=sum" target="sum" />
         </zeebe:ioMapping>
       </extensionElements>
     </serviceTask>
@@ -432,7 +536,7 @@ test("a task set up from a template runs: FEEL and literals; a blank field write
   const done = await engine.getInstance(instance.id);
   expect(done.error).toBeNull();
   // b was never set: it stays at its default, 0.
-  expect(done.variables).toMatchObject({ add: { sum: 42 } });
+  expect(done.variables).toMatchObject({ sum: 42 });
 });
 
 test("FEEL that does not parse fails the deploy; a missing variable fails the run, named", async () => {
@@ -442,7 +546,7 @@ test("FEEL that does not parse fails the deploy; a missing variable fails the ru
       "bad-feel",
       callingProcess("bad-feel", [{ id: "add", method: "acme.demo.v1.MathService/Add", params: { a: "=1 +" } }]),
     ),
-  ).rejects.toThrow(/service task add: input "a" is not valid FEEL/);
+  ).rejects.toThrow(/add: input "a" is not valid FEEL/);
 
   const { id } = await engine.deploy(
     "missing-var",
@@ -515,8 +619,8 @@ test("the Services tab lists registered services; a service page shows methods, 
     const { id } = await engine.deploy(
       "uses-math",
       callingProcess("uses-math", [
-        { id: "sum", method: "acme.demo.v1.MathService/Add", params: { a: "1", b: "2" } },
-        { id: "split", method: "acme.demo.v1.MathService/Divide", params: { a: "=sum.sum", b: "=zero" } },
+        { id: "sum", method: "acme.demo.v1.MathService/Add", params: { a: "1", b: "2" }, outputs: { sum: "=sum" } },
+        { id: "split", method: "acme.demo.v1.MathService/Divide", params: { a: "=sum", b: "=zero" } },
       ]),
     );
     const instance = await engine.start(id, { zero: 0 });

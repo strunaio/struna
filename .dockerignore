@@ -1,0 +1,14 @@
+# Only what the runtime image copies (see Dockerfile); everything else stays out
+# of the build context.
+*
+!package.json
+!package-lock.json
+!prisma.config.ts
+!prisma/
+!node_modules/
+!dist/
+!src/views/
+
+# Never ship local env files.
+**/.env
+**/.env.*

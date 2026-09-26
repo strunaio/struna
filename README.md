@@ -12,7 +12,7 @@ them over a Connect RPC API.
 | Workflow engine | bpmn-engine 26 (+ bpmn-moddle for validation) |
 | RPC | ConnectRPC 2 (`@connectrpc/connect`, `connect-node`) + protobuf-es 2 |
 | Persistence | Postgres 18, Prisma 7 with the `pg` driver adapter |
-| UI | htmx 2 (+ SSE extension), Eta 4 templates, bpmn-js 18 viewer |
+| UI | htmx 2 (+ a small SSE script), Eta 4 templates, bpmn-js 18 viewer |
 | Tests | Vitest 5 |
 
 ## Getting started
@@ -78,13 +78,64 @@ applies to BPMN timer events only; a script's own `setTimeout(next, …)` is an
 ordinary timer that the worker waits out within the run (up to the 30s run
 limit).
 
-**Task results are variables.** When a task ends, its result — the payload
-it was signalled with, or what a script passed to `next(null, …)` — is kept
-in the process variables under the task's id. A gateway after an approval
-reads `environment.variables.review_script.approved`; later tasks and the
-inspector see it too. (bpmn-engine on its own hands a result only to the flows
-leaving that task.) An activity cut short without ending — by an interrupting
-boundary event, say — is logged as `activity.discard`.
+**Task results become variables the Camunda 8 way.** A task's result — the
+payload it was signalled with, a service's response, what a script passed to
+`next(null, …)` — reaches the process variables before the next gateway runs:
+
+| The task has | What is written |
+| --- | --- |
+| nothing — user task, receive task | the result's fields, merged by name (`{sum: 42}` → `sum`), as Camunda 8 does for completions and messages |
+| nothing — service task | nothing: like a Camunda connector, a service task keeps its response only where told to (it is still logged, and shown in the inspector as the step's result) |
+| `zeebe:output`s | only what they map: `<zeebe:output source="=quotient" target="half" />`; the source sees the result's fields, the task's inputs and the process variables, and a missing name maps to `null` |
+| task header `resultVariable` | the whole result under that name, as Camunda's connectors do |
+| task header `resultExpression` | FEEL over `response`, e.g. `={total: response.sum}`; its entries become variables |
+
+With both, Zeebe's propagation rule applies: once a task has `zeebe:output`s,
+only their targets leave the step. A result variable or a result
+expression's entries then stay inside it — an output can still read them
+(`<zeebe:output source="=loud" target="shout" />`), and the inspector notes
+under **Output mappings** that they stayed in the step.
+
+Where this comes from: Zeebe itself treats `zeebe:taskHeaders` as opaque
+metadata for the job worker. `resultVariable` and `resultExpression` are the
+Camunda Connectors convention — the connector runtime reads them and
+completes the job with what they produce — and struna plays that runtime for
+service tasks, binding them in its templates as Camunda's connector templates
+do. (Zeebe's own `resultVariable` is an attribute, on `zeebe:script` and
+`zeebe:calledDecision`; struna supports the script one.) One difference: a
+connector completes with only the result variable and result expression, so
+its output mappings cannot read the raw response. struna's output mappings
+can (`=sum`, `=quotient`), as a job worker completing with the whole response
+would allow — which is what the templates' per-field outputs rely on. On
+Camunda 8 itself, the result headers work only where a connector-style worker
+handles the job type.
+
+When several steps answer with the same field — every approval says
+`approved` — map each to its own name, as `examples/video-render.bpmn` does.
+FEEL in outputs and result expressions is checked at deploy. Element
+templates offer, in their **Output mapping** group, one field per response field
+(`Map quotient to` — type the variable to write; it becomes
+`<zeebe:output source="=quotient" target="…" />`) plus **Result variable**
+and **Result expression**. In the properties panel a FEEL value shows with a
+grey `=` badge in front (`= sum`); the `=` is the FEEL marker, not text.
+Variables are one set per instance: sub-process scopes are not modelled yet.
+
+**FEEL everywhere, as in Camunda 8.** Gateway conditions written
+`=total >= 100` and script tasks with
+`<zeebe:script expression="=…" resultVariable="total" />` are evaluated as
+FEEL over the instance's variables (a `zeebe:script` must name its
+`resultVariable`). JavaScript conditions and scripts (`language="javascript"`,
+`scriptFormat="javascript"`) still run, but Camunda editors flag them.
+
+**Messages.** A receive task may wait for a Camunda 8 message
+(`messageRef` plus `zeebe:subscription`). struna still delivers it by the
+task's element id — `SignalInstance(elementId="wait_order", payload=…)` — and
+the payload follows the task's output rules like any other result. Correlation
+keys are accepted for compatibility but not used: struna delivers to an
+instance by id.
+
+An activity cut short without ending — by an interrupting boundary event,
+say — is logged as `activity.discard`.
 
 **Cancel and retry.** `CancelInstance` (or **Cancel instance** on the
 instance page, which asks first and takes an optional reason) stops a pending
@@ -92,15 +143,20 @@ or running instance for good. It is a request, like a signal: the worker that
 next holds the instance carries it out — so it never races a run in progress —
 and records a `process.cancel` event with the reason; until then the instance
 reports `cancel_requested`. `RetryInstance` (**Retry** on a failed instance)
-resumes it from the last state a worker saved, i.e. where it last waited: the
-steps since then run again, and the signals that failed run had consumed are
-applied again, since a failed run keeps its inbox. A `process.retry` event
+resumes it from the last state a worker saved: where it last waited, or the
+last successful service call, whichever came later. The steps since then run
+again, and the signals the failed run consumed since that save are applied
+again, since a failed run keeps them in its inbox. A `process.retry` event
 marks the seam in the log. Neither is behind a login yet.
 
-**At-least-once.** State is saved when an instance comes to rest. If a worker
-dies mid-run, the next one repeats everything since the last save — service
-tasks should be idempotent. A run is also cut off after 30s (it is stopped,
-saved and retried on the next tick), which bounds a task that never returns.
+**At-least-once.** State is saved when an instance comes to rest and, while
+it runs, after every successful service call (keeping the lease). So a
+failure or a dead worker repeats only the steps since the last save — a
+finished call is not made again, but the call in flight when things went
+wrong may have reached the service, which is why service tasks should still
+be idempotent (`struna-instance-id` and `struna-element-id` headers help). A
+run is also cut off after 30s (it is stopped, saved and retried on the next
+tick), which bounds a task that never returns.
 
 ## Service tasks
 
@@ -153,7 +209,9 @@ make the request:
 - A dotted target sets a nested field. Non-string fields take a FEEL value or
   literal JSON: `42`, `true`, `["a","b"]`, `{"k":1}`. Proto and JSON field
   names both work.
-- The response, as proto JSON, is the task's result: `variables.notify`.
+- The response, as proto JSON, is the task's result, applied by the rules
+  above — as with a Camunda connector, only what an output mapping, a
+  `resultVariable` or a `resultExpression` keeps reaches the variables.
 - Each call carries `struna-instance-id` and `struna-element-id` headers and a
   25s timeout. A failed call fails the instance with the method and the
   service's error code and message; a FEEL expression over a missing variable
@@ -231,10 +289,13 @@ The top half is what the BPMN says: documentation, a script task's script,
 a gateway's outgoing flows with their conditions (and which is the default),
 a flow's condition, timer/message/signal definitions, loop settings and
 extension attributes such as `zeebe:*`. On an instance page, the inspector
-adds what happened: each time the element ran (a loop shows ×N on the shape),
-when it started, waited and ended, the signal payloads it received, its
-output, the instance's variables right after it finished, and how often each
-branch was taken — taken flows are drawn green. The instance page also shows
+adds what happened, as Operate shows it: each time the element ran (a loop
+shows ×N on the shape), when it started, waited and ended, the signal
+payloads it received, its **input mappings** and **output mappings** with the
+values they evaluated to, its raw result, the **variables it changed**
+(before → after, which Operate cannot show; the full set is one click away),
+and how often each branch was taken — taken flows are drawn
+green. The instance page also shows
 the current variables. This comes from the event log: workers record an
 element's output on `activity.end`, applied signals as `signal` events, taken
 flows as `flow.take`, and a `variables` snapshot whenever the data changes.
@@ -275,14 +336,20 @@ Connect — same process, no client bundle, no second copy of the domain types.
 | `POST /instances/:id/signal/:elementId` | signal a waiting activity; answers with the fragment named by `HX-Target` |
 | `POST /instances/:id/cancel` | request a cancel (form field `reason`) |
 | `POST /instances/:id/retry` | retry a failed instance |
-| `GET /events/stream` | SSE stream of engine events as `<li>` fragments |
+| `GET /events/stream` | SSE stream of engine events as `<li>` fragments, each with its `id`; `?after=<id>` (or `Last-Event-ID`) resumes |
+| `GET /health` | `{"status":"ok"}`, for load balancers and the image's `HEALTHCHECK` |
 | `GET /favicon.svg` | the brand mark |
-| `GET /static/htmx.js`, `/static/sse.js` | served from the installed packages |
+| `GET /static/htmx.js` | served from the installed package |
 | `GET /static/bpmn-viewer.js`, `/static/diagram-js.css`, `/static/bpmn-js.css` | bpmn-js, same |
 
 Refresh is event-driven: the instances table carries
 `hx-trigger="sse:engine, every 30s"`, so anything that moves the engine —
-including a change made over the RPC API — updates the page.
+including a change made over the RPC API — updates the page. All tabs share
+one stream: browsers allow six HTTP/1.1 connections per server, and a stream
+per tab would soon leave none for clicks. The tab holding the
+`struna-events` Web Lock keeps the stream and passes events to the others
+over a BroadcastChannel; when it closes, another tab takes the lock and
+resumes after the last event it saw.
 
 Colours: neutral greys, with violet only for the brand mark, the active tab
 and focus rings. Blue, green, red and grey are kept for status (running,
@@ -321,7 +388,7 @@ so Camunda editors open them in the mode struna's templates target.
 | --- | --- |
 | `examples/hello.bpmn` | one user task: start, signal, done |
 | `examples/video-render.bpmn` | agentic video render: agents (receive tasks) draft a script, a storyboard and a voiceover in parallel and render the cut; people (user tasks) approve the script with a revise loop, approve over-budget spend, investigate a render that runs over 2 hours (boundary timer), and sign off the release |
-| `examples/math-demo.bpmn` | service tasks calling the demo Connect services: add two numbers, halve the sum (reading the previous step's result), branch on it, and greet in the start variable's language |
+| `examples/math-demo.bpmn` | service tasks calling the demo Connect services: add two numbers, halve the sum (reading the previous step's result), branch on it, greet in the start variable's language, and sum it up in a FEEL script task |
 
 In `video-render.bpmn`, every step's documentation says what to signal it
 with; an agent reports back exactly like a person does:
@@ -372,6 +439,35 @@ src/views/*.eta                 Eta templates (`_`-prefixed ones are fragments)
 src/gen/                        generated code (git-ignored, run `npm run gen`)
 ```
 
+## Docker and CI
+
+The image is runtime-only (`node:24-alpine`): CI installs, generates, builds,
+tests and prunes, and the `Dockerfile` copies `dist/`, the pruned
+`node_modules`, `src/views` and `prisma/` in. No npm install runs inside it.
+
+```sh
+docker run -e DATABASE_URL=postgresql://… -p 8080:8080 ghcr.io/strunaio/struna             # serve --worker
+docker run -e DATABASE_URL=postgresql://… ghcr.io/strunaio/struna worker                    # a standalone worker
+docker run --rm -e DATABASE_URL=postgresql://… --entrypoint node_modules/.bin/prisma \
+  ghcr.io/strunaio/struna migrate deploy                                                    # before a new release
+```
+
+`GET /health` answers `{"status":"ok"}`; the image's `HEALTHCHECK` uses it.
+It listens on `0.0.0.0:8080` (`HOST`, `PORT`).
+
+GitHub Actions (`.github/workflows/main.yaml`) runs on pull requests, `main`
+and `v*` tags, built from composite actions in `.github/actions`:
+
+| Action | Does |
+| --- | --- |
+| `setup` | Node 24 with the npm cache, `npm ci` (which generates the protobuf and Prisma code) |
+| `build` | `npm run build`, then `npm prune --omit=dev` for the image |
+| `docker` | builds the image (linux/amd64) and pushes it to `ghcr.io/<owner>/<repo>` |
+
+- **`test` job:** proto lint, typecheck and the test suite, against a `postgres:18` service.
+- **`image` job:** after `test`, builds the image on every run and pushes it only from `main` (`:main`, `:latest`, `:sha-…`) and tags (`:1.2.3`, `:1.2`).
+- **Why `PRISMA_CLI_BINARY_TARGETS` on the `image` job:** the runner's `node_modules` go into an Alpine image, so `npm ci` downloads Prisma's schema engine for both Debian (the runner) and musl (the image). Prisma has no schema or config setting for this.
+
 ## Scripts
 
 | Script | Does |
@@ -392,6 +488,17 @@ src/gen/                        generated code (git-ignored, run `npm run gen`)
 
 ## Notes
 
+- **Own BPMN settings and editor plugins.** Zeebe's own fields first
+  (`retries`, `retryBackoff`, `errorExpression`), a `struna:` namespace only
+  for what Zeebe cannot express, and a Camunda Modeler plugin later — see
+  [docs/editor-extensions.md](docs/editor-extensions.md).
+- **Service calls.** Service tasks call services inline, with no job queue.
+  Saving after each call, long-running operations (AIP-151) and retries are
+  planned in [docs/service-calls.md](docs/service-calls.md).
+- **Service metadata from the proto.** Doc comments as template help, and
+  optional `struna.v1` options (title, icon, field labels, `sensitive` for
+  masking) under the registry's own settings, are planned in
+  [docs/service-metadata.md](docs/service-metadata.md).
 - **Protocols.** The listener is HTTP/1.1, which serves the Connect and
   gRPC-Web protocols. Plain gRPC clients need HTTP/2 — swap `http.createServer`
   in `src/server/server.ts` for `http2.createServer` if you need them.

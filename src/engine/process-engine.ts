@@ -3,11 +3,23 @@ import { BpmnModdle } from "bpmn-moddle";
 import type { PrismaClient } from "../db/client.js";
 import type { Prisma } from "../gen/prisma/client.js";
 import { ProcessError } from "./errors.js";
-import { evaluate } from "feelin";
-import { inputMappings, methodOf, moddleOptions } from "./bpmn-extensions.js";
+import { parseExpression } from "feelin";
+import { inputMappings, methodOf, moddleOptions, outputMappings, taskHeaders } from "./bpmn-extensions.js";
+import { zeebeScript } from "./feel-scripts.js";
 import { EventFeed, waitingActivities } from "./event-feed.js";
 import { DEFAULT_PAYLOAD_POLICY, redact, type PayloadPolicy } from "./payload.js";
 import { findField, ServiceRegistry } from "./registry.js";
+
+/** Where a FEEL expression stops parsing, or undefined when it parses. */
+function feelSyntaxError(expression: string): number | undefined {
+  let at: number | undefined;
+  parseExpression(expression, {}, undefined).iterate({
+    enter: (node) => {
+      if (at === undefined && node.type.isError) at = node.from;
+    },
+  });
+  return at;
+}
 
 export type InstanceStatus = "pending" | "running" | "completed" | "failed" | "canceled";
 
@@ -41,7 +53,18 @@ const ELEMENT_EVENTS = [
   "activity.error",
   "activity.discard",
   "signal",
+  "inputs",
+  "outputs",
 ];
+
+/** One evaluated input or output mapping, as the log records it. */
+export interface MappingRow {
+  readonly target: string;
+  /** Output rows: "mapping", "expression", "merged", "whole", or "local" (stayed in the step). Inputs have none. */
+  readonly kind?: string;
+  readonly source: string;
+  readonly value: Prisma.JsonValue;
+}
 
 export interface ElementRun {
   readonly startedAt: Date | null;
@@ -51,9 +74,50 @@ export interface ElementRun {
   /** Cut short without ending, e.g. by an interrupting boundary event. */
   readonly interrupted: boolean;
   readonly signals: { readonly at: Date; readonly payload: Prisma.JsonValue }[];
+  /** Its input mappings as evaluated when it started (its local variables). */
+  readonly inputs: MappingRow[];
+  /** What its result wrote to the process variables, and from where. */
+  readonly outputs: MappingRow[];
   readonly output: Prisma.JsonValue | undefined;
   /** Instance data as this run left it, or as it is now for a run still open. */
   readonly variables: Prisma.JsonValue | undefined;
+  /** The process variables this run added, changed or removed; undefined while it is open. */
+  readonly changes: VariableChange[] | undefined;
+}
+
+/** One process variable a run touched, with its (masked) value before and after. */
+export interface VariableChange {
+  readonly name: string;
+  readonly kind: "added" | "changed" | "removed";
+  readonly before?: Prisma.JsonValue;
+  readonly after?: Prisma.JsonValue;
+}
+
+function snapshotVariables(snapshot: Prisma.JsonValue | undefined): Record<string, Prisma.JsonValue> {
+  const variables = (snapshot as { variables?: unknown } | null | undefined)?.variables;
+  return typeof variables === "object" && variables !== null && !Array.isArray(variables)
+    ? (variables as Record<string, Prisma.JsonValue>)
+    : {};
+}
+
+/** Top-level differences between two snapshots, in the order the variables appear. */
+export function variableChanges(
+  before: Prisma.JsonValue | undefined,
+  after: Prisma.JsonValue | undefined,
+): VariableChange[] {
+  const was = snapshotVariables(before);
+  const now = snapshotVariables(after);
+  const changes: VariableChange[] = [];
+  for (const [name, value] of Object.entries(now)) {
+    if (!(name in was)) changes.push({ name, kind: "added", after: value });
+    else if (JSON.stringify(was[name]) !== JSON.stringify(value)) {
+      changes.push({ name, kind: "changed", before: was[name] as Prisma.JsonValue, after: value });
+    }
+  }
+  for (const [name, value] of Object.entries(was)) {
+    if (!(name in now)) changes.push({ name, kind: "removed", before: value });
+  }
+  return changes;
 }
 
 export class ProcessEngine {
@@ -94,6 +158,7 @@ export class ProcessEngine {
         "invalid_argument",
       );
     }
+    this.#checkFeel(elementsById);
     await this.#checkServiceTasks(elementsById);
 
     // Read the latest version, claim the next one. Two deploys of the same
@@ -112,6 +177,46 @@ export class ProcessEngine {
       } catch (cause) {
         if (!isUniqueViolation(cause) || attempt >= DEPLOY_ATTEMPTS) throw cause;
       }
+    }
+  }
+
+  /**
+   * FEEL that does not parse, anywhere a task takes it — inputs, outputs,
+   * `resultExpression` — fails the deploy. Only the syntax is checked:
+   * evaluating without the variables would trip over valid expressions,
+   * e.g. `string(a)` with `a` still unknown.
+   */
+  #checkFeel(elementsById: Record<string, unknown>): void {
+    const check = (id: string | undefined, what: string, source: string) => {
+      if (!source.startsWith("=")) return;
+      const at = feelSyntaxError(source.slice(1));
+      if (at !== undefined) {
+        throw new ProcessError(`${id}: ${what} is not valid FEEL: syntax error at position ${at}`, "invalid_argument");
+      }
+    };
+    for (const element of Object.values(elementsById)) {
+      const { id, $type, extensionElements, conditionExpression } = element as {
+        id?: string;
+        $type?: string;
+        extensionElements?: unknown;
+        conditionExpression?: { body?: string; language?: string };
+      };
+      const condition = conditionExpression?.body?.trim();
+      if (condition !== undefined && conditionExpression?.language === undefined) check(id, "condition", condition);
+      if ($type === "bpmn:ScriptTask") {
+        const script = zeebeScript(extensionElements);
+        if (script !== undefined) {
+          check(id, "script", script.expression.startsWith("=") ? script.expression : `=${script.expression}`);
+          if (script.resultVariable === undefined) {
+            throw new ProcessError(`${id}: a zeebe:script needs a resultVariable`, "invalid_argument");
+          }
+        }
+      }
+      if (extensionElements === undefined) continue;
+      for (const input of inputMappings(extensionElements)) check(id, `input "${input.target}"`, input.source);
+      for (const output of outputMappings(extensionElements)) check(id, `output "${output.target}"`, output.source);
+      const expression = taskHeaders(extensionElements)["resultExpression"];
+      if (expression !== undefined) check(id, "resultExpression", expression);
     }
   }
 
@@ -141,20 +246,6 @@ export class ProcessEngine {
         );
       }
       for (const input of inputMappings(task.extensionElements)) {
-        if (input.source.startsWith("=")) {
-          // FEEL has no side effects: evaluating against nothing only checks the
-          // syntax (missing variables are warnings, not errors).
-          try {
-            evaluate(input.source.slice(1), {});
-          } catch (cause) {
-            throw new ProcessError(
-              `service task ${task.id}: input "${input.target}" is not valid FEEL: ${
-                cause instanceof Error ? cause.message : String(cause)
-              }`,
-              "invalid_argument",
-            );
-          }
-        }
         let message: DescMessage | undefined = resolved.method.input;
         for (const segment of input.target.split(".")) {
           const field: DescField | undefined =
@@ -293,6 +384,8 @@ export class ProcessEngine {
       failed: boolean;
       interrupted: boolean;
       signals: { at: Date; payload: Prisma.JsonValue }[];
+      inputs: MappingRow[];
+      outputs: MappingRow[];
       output: Prisma.JsonValue | undefined;
       startId: bigint | null;
       endId: bigint | null;
@@ -302,7 +395,7 @@ export class ProcessEngine {
       let run = runs.at(-1);
       if (run === undefined) {
         run = { startedAt: null, endedAt: null, waitedAt: null, failed: false, interrupted: false,
-                signals: [], output: undefined, startId: null, endId: null };
+                signals: [], inputs: [], outputs: [], output: undefined, startId: null, endId: null };
         runs.push(run);
       }
       return run;
@@ -312,8 +405,8 @@ export class ProcessEngine {
       switch (event.type) {
         case "activity.start":
           runs.push({ startedAt: event.createdAt, endedAt: null, waitedAt: null, failed: false,
-                      interrupted: false, signals: [], output: undefined, startId: event.id,
-                      endId: null });
+                      interrupted: false, signals: [], inputs: [], outputs: [], output: undefined,
+                      startId: event.id, endId: null });
           break;
         case "activity.wait":
           current().waitedAt = event.createdAt;
@@ -321,6 +414,12 @@ export class ProcessEngine {
         case "signal":
           current().signals.push({ at: event.createdAt, payload: event.payload });
           break;
+        case "inputs":
+        case "outputs": {
+          const rows = ((event.payload as { mappings?: MappingRow[] } | null)?.mappings ?? []);
+          current()[event.type].push(...rows);
+          break;
+        }
         case "activity.end": {
           const run = current();
           run.endedAt = event.createdAt;
@@ -343,6 +442,7 @@ export class ProcessEngine {
     return runs.map((run, index) => {
       const nextStart = runs[index + 1]?.startId ?? null;
       let variables: Prisma.JsonValue | undefined;
+      let changes: VariableChange[] | undefined;
       if (run.interrupted) {
         variables = undefined;
       } else if (run.endId === null) {
@@ -356,6 +456,9 @@ export class ProcessEngine {
           (s) => s.elementId === elementId && s.id > endId && (nextStart === null || s.id < nextStart),
         );
         variables = (own ?? snapshots.filter((s) => s.id < endId).at(-1))?.payload;
+        // Only its own snapshot says what it changed, measured against the
+        // one just before — so a parallel branch's writes are not pinned on it.
+        changes = own === undefined ? [] : variableChanges(snapshots.filter((s) => s.id < own.id).at(-1)?.payload, own.payload);
       }
       return {
         startedAt: run.startedAt,
@@ -364,8 +467,11 @@ export class ProcessEngine {
         failed: run.failed,
         interrupted: run.interrupted,
         signals: run.signals,
+        inputs: run.inputs,
+        outputs: run.outputs,
         output: run.output,
         variables,
+        changes,
       };
     });
   }
