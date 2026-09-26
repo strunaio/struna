@@ -7,7 +7,6 @@
     <title><%= it.title %></title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <script src="/static/htmx.js" defer></script>
-    <script src="/static/sse.js" defer></script>
     <% if (it.diagram) { %>
     <link rel="stylesheet" href="/static/diagram-js.css" />
     <link rel="stylesheet" href="/static/bpmn-js.css" />
@@ -202,15 +201,21 @@
       table.flows { font-size: .85rem; background: var(--surface); border: 1px solid var(--line); border-radius: .4rem; }
       table.flows th, table.flows td { padding: .35rem .6rem; }
       code.expr { white-space: pre-wrap; }
+      table.mappings { font-size: .85rem; background: var(--surface); border: 1px solid var(--line); border-radius: .4rem; }
+      table.mappings th, table.mappings td { padding: .35rem .6rem; }
+      table.mappings td code { white-space: pre-wrap; word-break: break-word; }
+      .unmapped { margin: 0; font-size: .85rem; }
+      .all-variables { margin-top: .5rem; font-size: .85rem; }
+      .all-variables summary { cursor: pointer; }
     </style>
   </head>
-  <body hx-ext="sse" sse-connect="/events/stream">
+  <body data-stream="/events/stream">
     <header class="topbar">
       <div class="wrap">
         <div class="topbar-left">
           <a class="brand" href="/">
             <span class="brand-mark" aria-hidden="true"><%~ include("./_mark.eta") %></span>
-            struna
+            Struna
           </a>
           <nav class="tabs" aria-label="Main">
             <% [["overview", "/", "Overview"], ["definitions", "/definitions", "Definitions"],
@@ -236,5 +241,66 @@
     <footer>
       <div class="wrap"><% if (it.nav) { %><span class="mono"><%= it.nav.version %></span><% } %></div>
     </footer>
+    <script>
+      /* Live updates, one stream for all tabs. Browsers allow six HTTP/1.1
+         connections per server, so a stream per tab soon leaves none for
+         clicks. The tab holding the "struna-events" lock keeps the stream and
+         passes each event to the others over a BroadcastChannel; when it goes
+         away the lock moves to another tab, which resumes after the last event
+         it saw. Each event is prepended to [sse-swap="engine"] lists and fires
+         "sse:engine" on elements that refresh on it (hx-trigger). */
+      (function () {
+        var url = document.body.dataset.stream, last = null, seen = [], pending = null;
+        var channel = "BroadcastChannel" in window ? new BroadcastChannel("struna-events") : null;
+        function refresh() {
+          clearTimeout(pending);
+          pending = setTimeout(function () {
+            document.querySelectorAll("[hx-trigger*='sse:engine']").forEach(function (el) { htmx.trigger(el, "sse:engine"); });
+          }, 100);
+        }
+        function apply(html, id) {
+          // A new stream holder replays from its own position; skip what this tab already has.
+          if (id) {
+            if (seen.indexOf(id) >= 0) return;
+            seen.push(id);
+            if (seen.length > 500) seen.shift();
+            last = id;
+          }
+          document.querySelectorAll("[sse-swap='engine']").forEach(function (el) {
+            htmx.swap(el, html, { swapStyle: "afterbegin" });
+          });
+          refresh();
+        }
+        function post(message) { if (channel !== null) channel.postMessage(message); }
+        if (channel !== null) {
+          channel.onmessage = function (e) {
+            if (e.data.type === "engine") apply(e.data.html, e.data.id);
+            else if (e.data.type === "hello" && last === null) last = e.data.seq;
+          };
+        }
+        /* Hold the stream until this page goes away. */
+        function lead() {
+          return new Promise(function (release) {
+            var source = new EventSource(url + (last === null ? "" : "?after=" + encodeURIComponent(last)));
+            source.addEventListener("hello", function (e) {
+              if (last === null) last = e.data;
+              post({ type: "hello", seq: e.data });
+            });
+            source.addEventListener("engine", function (e) {
+              apply(e.data, e.lastEventId);
+              post({ type: "engine", html: e.data, id: e.lastEventId });
+            });
+            window.addEventListener("pagehide", function () { source.close(); release(); }, { once: true });
+          });
+        }
+        function start() {
+          if (navigator.locks && channel !== null) navigator.locks.request("struna-events", lead);
+          else lead(); // No Web Locks: one stream per tab, as before.
+        }
+        document.addEventListener("DOMContentLoaded", start);
+        // Back from the back/forward cache: the lock was given up on pagehide.
+        window.addEventListener("pageshow", function (e) { if (e.persisted) start(); });
+      })();
+    </script>
   </body>
 </html>

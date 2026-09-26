@@ -64,7 +64,7 @@ test("serves the overview with one of each swappable section", async () => {
   // htmx swaps these by outerHTML, so a duplicate id would break the swap.
   expect(body.match(/id="definitions"/g)).toHaveLength(1);
   expect(body.match(/id="instances"/g)).toHaveLength(1);
-  expect(body).toContain('sse-connect="/events/stream"');
+  expect(body).toContain('data-stream="/events/stream"');
 });
 
 test("marks the current section in the header", async () => {
@@ -103,7 +103,7 @@ test("serves the favicon", async () => {
 });
 
 test("serves htmx and the sse extension from the installed packages", async () => {
-  for (const path of ["/static/htmx.js", "/static/sse.js"]) {
+  for (const path of ["/static/htmx.js"]) {
     const res = await fetch(`${base}${path}`);
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("javascript");
@@ -178,6 +178,12 @@ test("returns 404 for an unknown definition and an unknown path", async () => {
   expect((await fetch(`${base}/nope`)).status).toBe(404);
 });
 
+test("answers health checks on /health", async () => {
+  const res = await fetch(`${base}/health`);
+  expect(res.status).toBe(200);
+  expect(await res.json()).toEqual({ status: "ok" });
+});
+
 test("pushes engine events to the SSE feed as html fragments", async () => {
   const definitionId = await deploy("ui-sse");
   const abort = new AbortController();
@@ -209,6 +215,36 @@ test("pushes engine events to the SSE feed as html fragments", async () => {
   for (const line of buffer.split("\n")) {
     if (line.startsWith("data: ")) expect(line).not.toContain("\n");
   }
+});
+
+test("a stream resumes after the last event a tab saw", async () => {
+  // Read one stream until `until` shows up, then close it.
+  async function read(path: string, until: string): Promise<string> {
+    const abort = new AbortController();
+    const res = await fetch(`${base}${path}`, { signal: abort.signal });
+    const reader = res.body!.pipeThrough(new TextDecoderStream()).getReader();
+    let buffer = "";
+    while (!buffer.includes(until)) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += value ?? "";
+    }
+    abort.abort();
+    return buffer;
+  }
+
+  const definitionId = await deploy("ui-resume");
+  // A fresh stream says where it starts; events carry their id.
+  const hello = await read("/events/stream", "\n\n");
+  const start = /event: hello\ndata: (\d+)/.exec(hello)?.[1];
+  expect(start).toBeDefined();
+
+  // Events recorded while the tab was away are replayed from there.
+  const { instance } = await client.startInstance({ definitionIdOrName: definitionId, variables: {} });
+  await tick();
+  const resumed = await read(`/events/stream?after=${start}`, "process.start");
+  expect(resumed).toMatch(/id: \d+\nevent: engine\ndata: .*process\.start/);
+  expect(instance).toBeDefined();
 });
 
 test("serves the bpmn-js viewer and its stylesheets", async () => {
@@ -315,8 +351,12 @@ test("inspects one element of an instance, with masked data", async () => {
   expect(panel).toContain("UserTask");
   expect(panel).toContain("Signal");
   expect(panel).toContain("&quot;approved&quot;: true");
-  expect(panel).toContain("Variables after");
+  expect(panel).toMatch(/Variables changed<\/h4>[\s\S]*<code>approved<\/code>[\s\S]*<em class="faint">new<\/em>[\s\S]*<code>true<\/code>/);
+  expect(panel).toContain("All variables after this run");
   expect(panel).not.toContain("t0ps3cret");
+  // Both mapping blocks are always there; without mappings they say what happened.
+  expect(panel).toMatch(/Input mappings<\/h4>\s*<p class="faint unmapped">None/);
+  expect(panel).toMatch(/Output mappings<\/h4>\s*<p class="faint unmapped">None — the result's fields became process variables by name: <code>approved<\/code>/);
 
   const never = await (await fetch(`${base}/instances/${instance!.id}/elements/nowhere`)).text();
   expect(never).toContain("has not run in this instance");

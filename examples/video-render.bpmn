@@ -2,11 +2,15 @@
 <!--
   Agentic video render: AI agents do the work, people approve it.
 
-  Agent steps are receive tasks: struna parks the instance until the agent
-  reports back with SignalInstance(elementId=<task id>, payload=<result>).
+  Agent steps are receive tasks waiting for a message: struna parks the
+  instance until the agent reports back with SignalInstance(elementId=<task
+  id>, payload=<result>). The messages' correlation keys are for Camunda 8
+  compatibility; struna delivers to an instance by id, not by correlation.
   Human steps are user tasks, completed the same way from the dashboard or
-  the API. Each task's result is kept in variables under its id, so the
-  gateways read e.g. environment.variables.review_script.approved.
+  the API. Results reach the variables the Camunda 8 way: merged by name,
+  unless the task maps them. The three approvals all answer "approved", so
+  each maps it to its own name (script_approved, budget_approved,
+  release_approved) with a zeebe:output.
 
   Start variables: { "brief": "...", "budget_usd": 100 }
 
@@ -26,6 +30,26 @@
              modeler:executionPlatformVersion="8.7.0"
              id="video-render-definitions"
              targetNamespace="http://struna.io/bpmn">
+  <message id="Message_draft_script" name="draft_script">
+    <extensionElements>
+      <zeebe:subscription correlationKey="=brief" />
+    </extensionElements>
+  </message>
+  <message id="Message_generate_storyboard" name="generate_storyboard">
+    <extensionElements>
+      <zeebe:subscription correlationKey="=brief" />
+    </extensionElements>
+  </message>
+  <message id="Message_generate_voiceover" name="generate_voiceover">
+    <extensionElements>
+      <zeebe:subscription correlationKey="=brief" />
+    </extensionElements>
+  </message>
+  <message id="Message_render_video" name="render_video">
+    <extensionElements>
+      <zeebe:subscription correlationKey="=brief" />
+    </extensionElements>
+  </message>
   <process id="video_render" name="Agentic video render" isExecutable="true">
 
     <startEvent id="brief_received" name="Brief received">
@@ -39,7 +63,7 @@
     </exclusiveGateway>
     <sequenceFlow id="to_draft_script" sourceRef="draft_merge" targetRef="draft_script" />
 
-    <receiveTask id="draft_script" name="Draft script (agent)">
+    <receiveTask id="draft_script" messageRef="Message_draft_script" name="Draft script (agent)">
       <documentation>Script agent writes the script from the brief (and the reviewer's feedback on a revision). Signal: { "script": "...", "scenes": 5 }</documentation>
       <incoming>to_draft_script</incoming>
       <outgoing>to_review_script</outgoing>
@@ -50,6 +74,10 @@
       <documentation>Editor approves the script or sends it back. Signal: { "approved": true } or { "approved": false, "feedback": "..." }</documentation>
       <extensionElements>
         <zeebe:userTask />
+        <zeebe:ioMapping>
+          <zeebe:output source="=approved" target="script_approved" />
+          <zeebe:output source="=feedback" target="script_feedback" />
+        </zeebe:ioMapping>
       </extensionElements>
       <incoming>to_review_script</incoming>
       <outgoing>to_script_ok</outgoing>
@@ -62,16 +90,17 @@
       <outgoing>revise_script</outgoing>
     </exclusiveGateway>
     <sequenceFlow id="script_approved" name="approved" sourceRef="script_ok" targetRef="estimate_cost">
-      <conditionExpression xsi:type="tFormalExpression" language="javascript">next(null, environment.variables.review_script.approved === true)</conditionExpression>
+      <conditionExpression xsi:type="tFormalExpression">=script_approved = true</conditionExpression>
     </sequenceFlow>
     <sequenceFlow id="revise_script" name="revise" sourceRef="script_ok" targetRef="draft_merge" />
 
-    <scriptTask id="estimate_cost" name="Estimate render cost" scriptFormat="javascript">
-      <documentation>$12 per scene, from the approved draft.</documentation>
+    <scriptTask id="estimate_cost" name="Estimate render cost">
+      <documentation>$12 per scene of the approved draft, as estimate_usd.</documentation>
+      <extensionElements>
+        <zeebe:script expression="=(if scenes = null then 1 else scenes) * 12" resultVariable="estimate_usd" />
+      </extensionElements>
       <incoming>script_approved</incoming>
       <outgoing>to_budget_check</outgoing>
-      <script>var draft = environment.variables.draft_script || {};
-next(null, { usd: (draft.scenes || 1) * 12 });</script>
     </scriptTask>
     <sequenceFlow id="to_budget_check" sourceRef="estimate_cost" targetRef="budget_check" />
 
@@ -81,7 +110,7 @@ next(null, { usd: (draft.scenes || 1) * 12 });</script>
       <outgoing>over_budget</outgoing>
     </exclusiveGateway>
     <sequenceFlow id="within_budget" name="yes" sourceRef="budget_check" targetRef="assets_merge">
-      <conditionExpression xsi:type="tFormalExpression" language="javascript">next(null, environment.variables.estimate_cost.usd &lt;= (environment.variables.budget_usd || 100))</conditionExpression>
+      <conditionExpression xsi:type="tFormalExpression">=estimate_usd &lt;= (if budget_usd = null then 100 else budget_usd)</conditionExpression>
     </sequenceFlow>
     <sequenceFlow id="over_budget" name="no" sourceRef="budget_check" targetRef="approve_budget" />
 
@@ -89,6 +118,9 @@ next(null, { usd: (draft.scenes || 1) * 12 });</script>
       <documentation>The estimate is over budget_usd. Signal: { "approved": true } to spend it anyway.</documentation>
       <extensionElements>
         <zeebe:userTask />
+        <zeebe:ioMapping>
+          <zeebe:output source="=approved" target="budget_approved" />
+        </zeebe:ioMapping>
       </extensionElements>
       <incoming>over_budget</incoming>
       <outgoing>to_budget_ok</outgoing>
@@ -101,7 +133,7 @@ next(null, { usd: (draft.scenes || 1) * 12 });</script>
       <outgoing>budget_refused</outgoing>
     </exclusiveGateway>
     <sequenceFlow id="budget_approved" name="yes" sourceRef="budget_ok" targetRef="assets_merge">
-      <conditionExpression xsi:type="tFormalExpression" language="javascript">next(null, environment.variables.approve_budget.approved === true)</conditionExpression>
+      <conditionExpression xsi:type="tFormalExpression">=budget_approved = true</conditionExpression>
     </sequenceFlow>
     <sequenceFlow id="budget_refused" name="no" sourceRef="budget_ok" targetRef="stopped_over_budget" />
     <endEvent id="stopped_over_budget" name="Stopped: over budget">
@@ -123,12 +155,12 @@ next(null, { usd: (draft.scenes || 1) * 12 });</script>
     <sequenceFlow id="to_storyboard" sourceRef="make_assets" targetRef="generate_storyboard" />
     <sequenceFlow id="to_voiceover" sourceRef="make_assets" targetRef="generate_voiceover" />
 
-    <receiveTask id="generate_storyboard" name="Generate storyboard (agent)">
+    <receiveTask id="generate_storyboard" messageRef="Message_generate_storyboard" name="Generate storyboard (agent)">
       <documentation>Image agent draws a frame per scene. Signal: { "frames": ["https://…"] }</documentation>
       <incoming>to_storyboard</incoming>
       <outgoing>storyboard_done</outgoing>
     </receiveTask>
-    <receiveTask id="generate_voiceover" name="Generate voiceover (agent)">
+    <receiveTask id="generate_voiceover" messageRef="Message_generate_voiceover" name="Generate voiceover (agent)">
       <documentation>Voice agent reads the script. Signal: { "audio": "https://…" }</documentation>
       <incoming>to_voiceover</incoming>
       <outgoing>voiceover_done</outgoing>
@@ -149,7 +181,7 @@ next(null, { usd: (draft.scenes || 1) * 12 });</script>
     </exclusiveGateway>
     <sequenceFlow id="to_render" sourceRef="render_merge" targetRef="render_video" />
 
-    <receiveTask id="render_video" name="Render video (agent)">
+    <receiveTask id="render_video" messageRef="Message_render_video" name="Render video (agent)">
       <documentation>Render agent assembles frames and audio. Signal: { "url": "https://…/video.mp4" }. If it takes over 2 hours, a person looks into it.</documentation>
       <incoming>to_render</incoming>
       <outgoing>to_final_review</outgoing>
@@ -176,6 +208,9 @@ next(null, { usd: (draft.scenes || 1) * 12 });</script>
       <documentation>Watch the cut. Signal: { "approved": true } to publish, { "approved": false } to reject.</documentation>
       <extensionElements>
         <zeebe:userTask />
+        <zeebe:ioMapping>
+          <zeebe:output source="=approved" target="release_approved" />
+        </zeebe:ioMapping>
       </extensionElements>
       <incoming>to_final_review</incoming>
       <outgoing>to_release_ok</outgoing>
@@ -188,14 +223,16 @@ next(null, { usd: (draft.scenes || 1) * 12 });</script>
       <outgoing>release_rejected</outgoing>
     </exclusiveGateway>
     <sequenceFlow id="release_approved" name="yes" sourceRef="release_ok" targetRef="publish">
-      <conditionExpression xsi:type="tFormalExpression" language="javascript">next(null, environment.variables.final_review.approved === true)</conditionExpression>
+      <conditionExpression xsi:type="tFormalExpression">=release_approved = true</conditionExpression>
     </sequenceFlow>
     <sequenceFlow id="release_rejected" name="no" sourceRef="release_ok" targetRef="rejected" />
 
-    <scriptTask id="publish" name="Publish" scriptFormat="javascript">
+    <scriptTask id="publish" name="Publish">
+      <extensionElements>
+        <zeebe:script expression="={url: url, at: string(now())}" resultVariable="publication" />
+      </extensionElements>
       <incoming>release_approved</incoming>
       <outgoing>to_published</outgoing>
-      <script>next(null, { url: environment.variables.render_video.url, publishedAt: new Date().toISOString() });</script>
     </scriptTask>
     <sequenceFlow id="to_published" sourceRef="publish" targetRef="published" />
     <endEvent id="published" name="Published">

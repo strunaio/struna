@@ -116,12 +116,76 @@
           <h4>Signal <span class="faint mono"><%= at(signal.at) %></span></h4>
           <pre class="json"><%= json(signal.payload) %></pre>
         <% }) %>
+        <%
+          // Tasks always show both mapping blocks, so the layout stays put;
+          // what happened without a mapping is said in words, not as rows.
+          var isTask = el && /Task$/.test(el.type);
+          var mapped = run.outputs.filter(function (r) { return r.kind === "mapping"; });
+          var merged = run.outputs.filter(function (r) { return r.kind === "merged"; });
+          var whole = run.outputs.filter(function (r) { return r.kind === "whole" || (r.kind === "local" && !r.source); })[0];
+          var shaped = run.outputs.filter(function (r) { return r.kind === "expression" || (r.kind === "local" && r.source); });
+          var names = function (rows) { return rows.map(function (r) { return r.target; }).join(", "); };
+          var stays = function (r) { return r.kind === "local" ? " — it stays in the step, as nothing maps it" : ""; };
+          var done = run.endedAt && !run.failed;
+        %>
+        <% if (isTask || run.inputs.length) { %>
+          <h4>Input mappings</h4>
+          <% if (run.inputs.length) { %>
+            <%~ include("./_mappings.eta", { rows: run.inputs }) %>
+          <% } else { %>
+            <p class="faint unmapped">None — the step sees the process variables as they are.</p>
+          <% } %>
+        <% } %>
         <% if (run.output !== undefined) { %>
-          <h4>Output</h4>
+          <h4>Result</h4>
           <pre class="json"><%= json(run.output) %></pre>
         <% } %>
-        <% if (run.variables !== undefined) { %>
-          <h4><%= run.endedAt ? "Variables after" : "Variables now" %></h4>
+        <% if (isTask || run.outputs.length) { %>
+          <h4>Output mappings</h4>
+          <% if (mapped.length) { %>
+            <%~ include("./_mappings.eta", { rows: mapped }) %>
+          <% } else if (!done) { %>
+            <p class="faint unmapped">None so far — the step has not finished.</p>
+          <% } else if (merged.length) { %>
+            <p class="faint unmapped">None — the result's fields became process variables by name: <code><%= names(merged) %></code>.</p>
+          <% } else if (!whole && !shaped.length) { %>
+            <p class="faint unmapped"><% if (el && el.call) { %>None — like a Camunda connector, a service task keeps its response only where an output mapping, a result variable or a result expression says so.<% } else { %>None — the step left the process variables as they were.<% } %></p>
+          <% } else { %>
+            <p class="faint unmapped">None.</p>
+          <% } %>
+          <% if (whole) { %>
+            <p class="faint unmapped">Result variable <code><%= whole.target %></code> holds the whole result<%= stays(whole) %>.</p>
+          <% } %>
+          <% if (shaped.length) { %>
+            <p class="faint unmapped">Result expression <code><%= shaped[0].source %></code> set <code><%= names(shaped) %></code><%= stays(shaped[0]) %>.</p>
+          <% } %>
+        <% } %>
+        <% if (run.changes !== undefined) { %>
+          <h4>Variables changed</h4>
+          <% if (run.changes.length) { %>
+            <table class="mappings">
+              <thead><tr><th>Variable</th><th>Before</th><th>After</th></tr></thead>
+              <tbody>
+                <% run.changes.forEach(function (c) { %>
+                  <tr>
+                    <td><code><%= c.name %></code></td>
+                    <td><% if (c.kind === "added") { %><em class="faint">new</em><% } else { %><code class="faint"><%= JSON.stringify(c.before) %></code><% } %></td>
+                    <td><% if (c.kind === "removed") { %><em class="faint">removed</em><% } else { %><code><%= JSON.stringify(c.after) %></code><% } %></td>
+                  </tr>
+                <% }) %>
+              </tbody>
+            </table>
+          <% } else { %>
+            <p class="faint unmapped">None — this run left the process variables as they were.</p>
+          <% } %>
+          <% if (run.variables !== undefined) { %>
+            <details class="all-variables">
+              <summary class="faint">All variables after this run</summary>
+              <pre class="json"><%= json(snapshot(run.variables)) %></pre>
+            </details>
+          <% } %>
+        <% } else if (run.variables !== undefined) { %>
+          <h4>Process variables now</h4>
           <pre class="json"><%= json(snapshot(run.variables)) %></pre>
         <% } %>
       </section>

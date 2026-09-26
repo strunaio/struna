@@ -66,11 +66,22 @@ test("agents draft, people approve, and the video is published", async () => {
   expect(done.status).toBe("completed");
   expect(done.variables).toMatchObject({
     brief: "60s product teaser",
-    draft_script: { script: "v2", scenes: 5 },
-    review_script: { approved: true },
-    estimate_cost: { usd: 60 },
-    publish: { url: "https://cdn/video.mp4" },
+    // Merged by name: the latest draft and the agents' results.
+    script: "v2",
+    scenes: 5,
+    frames: ["a.png"],
+    audio: "vo.mp3",
+    url: "https://cdn/video.mp4",
+    estimate_usd: 60,
+    // Mapped: each approval under its own name, the rejection's feedback kept.
+    script_approved: true,
+    script_feedback: null,
+    release_approved: true,
+    // A FEEL zeebe:script's value, under its resultVariable.
+    publication: { url: "https://cdn/video.mp4" },
   });
+  expect(typeof (done.variables as { publication: { at: unknown } }).publication.at).toBe("string");
+  expect(done.variables).not.toHaveProperty("approved");
   const ended = await db.processEvent.findMany({
     where: { instanceId: id, type: "activity.end", elementId: { in: ["published", "rejected"] } },
   });

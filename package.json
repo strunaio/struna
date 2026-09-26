@@ -36,16 +36,15 @@
     "commander": "^15.0.0",
     "eta": "^4.6.0",
     "feelin": "^8.2.0",
-    "htmx-ext-sse": "^2.2.4",
     "htmx.org": "^2.0.11",
+    "prisma": "^7.10.0",
     "zeebe-bpmn-moddle": "^2.0.0"
   },
   "devDependencies": {
     "@bufbuild/buf": "^1.73.0",
     "@bufbuild/protoc-gen-es": "^2.15.0",
     "@types/bpmn-moddle": "^10.0.0",
-    "@types/node": "^26.6.2",
-    "prisma": "^7.10.0",
+    "@types/node": "^26.6.3",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
     "vitest": "^5.0.2"

@@ -1,5 +1,6 @@
 import { BpmnModdle } from "bpmn-moddle";
 import { inputMappings, methodOf, moddleOptions } from "../engine/bpmn-extensions.js";
+import { zeebeScript } from "../engine/feel-scripts.js";
 
 /** What the BPMN says about one element: the static half of the inspector. */
 export interface ElementDefinition {
@@ -169,10 +170,16 @@ export async function describeElement(
     .map((doc) => doc.text?.trim() ?? "")
     .filter((text) => text !== "");
 
+  const feelScript = zeebeScript(node["extensionElements"]);
   const script =
-    typeof node["script"] === "string" && node["script"].trim() !== ""
-      ? { language: node["scriptFormat"] as string | undefined, body: node["script"].trim() }
-      : undefined;
+    feelScript !== undefined
+      ? {
+          language: `FEEL → ${feelScript.resultVariable ?? "?"}`,
+          body: feelScript.expression,
+        }
+      : typeof node["script"] === "string" && node["script"].trim() !== ""
+        ? { language: node["scriptFormat"] as string | undefined, body: node["script"].trim() }
+        : undefined;
 
   const method = methodOf(node as { method?: unknown; extensionElements?: unknown });
   const call =

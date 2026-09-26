@@ -6,11 +6,12 @@ import { Engine, type BpmnEngineExecutionState } from "bpmn-engine";
 import { Timers } from "bpmn-elements";
 import type { PrismaClient } from "../db/client.js";
 import { Prisma } from "../gen/prisma/client.js";
-import { inputMappings, inputValue, methodOf, moddleOptions } from "./bpmn-extensions.js";
+import { applyResult, inputMappings, inputValue, methodOf, moddleOptions, resultRules } from "./bpmn-extensions.js";
 import { waitingActivities } from "./event-feed.js";
-import { DEFAULT_PAYLOAD_POLICY, sanitize, type PayloadPolicy } from "./payload.js";
+import { DEFAULT_PAYLOAD_POLICY, maskMappings, sanitize, type PayloadPolicy } from "./payload.js";
 import { ServiceRegistry } from "./registry.js";
 import { callMethod } from "./service-call.js";
+import { FeelScripts } from "./feel-scripts.js";
 import type { InstanceStatus } from "./process-engine.js";
 
 /** Engine events worth persisting; the engine emits far more than this. */
@@ -157,6 +158,7 @@ interface ActivityLike {
     method?: string;
     extensionElements?: unknown;
     Service?: unknown;
+    messageRef?: { id?: string };
   };
   on(event: string, handler: (api: { content?: { output?: unknown } }) => void, options?: { consumerTag?: string }): void;
   readonly broker: { cancel(consumerTag: string): void };
@@ -171,28 +173,89 @@ type ServiceCaller = (
 
 const TASK_RESULTS_TAG = "_struna-task-results";
 
-/** bpmn-engine extensions for one run. */
-function engineExtensions(callService: ServiceCaller) {
+/** Logs an event for the run (masked and capped there). */
+type Recorder = (type: string, elementId: string, payload: unknown) => void;
+
+/**
+ * bpmn-engine extensions for one run. `fail` stops the run with an error;
+ * `record` logs what a step's input and output mappings evaluated to.
+ */
+function engineExtensions(
+  callService: ServiceCaller,
+  fail: (cause: unknown) => void,
+  record: Recorder,
+  /** A step's result has reached the variables: snapshot them. */
+  applied: (elementId: string) => void,
+  /** A service call succeeded: save the run's progress once the engine settles. */
+  called: () => void,
+) {
+  /** A service step's input values: its local variables, for its output mappings. */
+  const locals = new Map<string, Record<string, unknown>>();
   return {
     /**
-     * When a task ends, keep its result — the payload it was signalled with,
-     * a script's `next(null, …)`, a service's response — in the process
-     * variables under the task's id. bpmn-engine itself hands a result only
-     * to the flows leaving that task; this makes an approval readable by the
-     * gateway after it (`environment.variables.review.approved`), by later
-     * tasks, and in the inspector.
+     * When a task ends, bring its result — the payload it was signalled with,
+     * a script's `next(null, …)`, a service's response — into the process
+     * variables the way Camunda 8 does: through its output mappings, its
+     * `resultVariable`/`resultExpression` headers, or else merged by name.
+     * bpmn-engine itself hands a result only to the flows leaving the task;
+     * this runs before them, so the next gateway already sees it.
      */
     taskResults(activity: ActivityLike) {
       // The process itself is not a task; its "result" is empty.
       if (activity.type === "bpmn:Process") return undefined;
+      const extensionElements = activity.behaviour.extensionElements;
+      const inputs = inputMappings(extensionElements);
+      // A service task evaluates (strictly) and logs its inputs as it calls.
+      const isServiceCall = activity.type === "bpmn:ServiceTask" && methodOf(activity.behaviour) !== undefined;
       return {
         activate() {
+          if (inputs.length > 0 && !isServiceCall) {
+            activity.on(
+              "start",
+              () => {
+                try {
+                  // Camunda 8 input mappings: the step's local variables.
+                  const values = Object.fromEntries(
+                    inputs.map((input) => [
+                      input.target,
+                      inputValue(input.source, activity.environment.variables, { strict: false }),
+                    ]),
+                  );
+                  locals.set(activity.id, values);
+                  record("inputs", activity.id, {
+                    mappings: inputs.map((input) => ({ ...input, value: values[input.target] })),
+                  });
+                } catch (cause) {
+                  fail(new Error(`${activity.id}: ${cause instanceof Error ? cause.message : String(cause)}`));
+                }
+              },
+              { consumerTag: `${TASK_RESULTS_TAG}-start` },
+            );
+          }
           activity.on(
             "end",
             (api) => {
-              const output = api?.content?.output;
-              if (output !== undefined && output !== null) {
-                activity.environment.variables[activity.id] = output;
+              let output = api?.content?.output;
+              if (output === undefined || output === null) {
+                locals.delete(activity.id);
+                return;
+              }
+              // A message's payload arrives with the message id, which is routing, not data.
+              const messageId = activity.behaviour.messageRef?.id;
+              if (messageId !== undefined && typeof output === "object" && (output as { id?: unknown }).id === messageId) {
+                const { id: _routing, ...data } = output as Record<string, unknown>;
+                output = data;
+              }
+              try {
+                // A service call is a connector: its response is kept only where mapped.
+                const rules = resultRules(extensionElements, locals.get(activity.id), isServiceCall ? "discard" : "merge");
+                const mappings = applyResult(activity.environment.variables, output, rules);
+                record("outputs", activity.id, { mappings });
+                applied(activity.id);
+              } catch (cause) {
+                fail(new Error(`${activity.id}: ${cause instanceof Error ? cause.message : String(cause)}`));
+              } finally {
+                locals.delete(activity.id);
               }
             },
             { consumerTag: TASK_RESULTS_TAG },
@@ -200,6 +263,7 @@ function engineExtensions(callService: ServiceCaller) {
         },
         deactivate() {
           activity.broker.cancel(TASK_RESULTS_TAG);
+          activity.broker.cancel(`${TASK_RESULTS_TAG}-start`);
         },
       };
     },
@@ -231,8 +295,15 @@ function engineExtensions(callService: ServiceCaller) {
               callback(cause);
               return;
             }
+            locals.set(activity.id, input);
+            record("inputs", activity.id, {
+              mappings: inputs.map((mapping) => ({ ...mapping, value: input[mapping.target] })),
+            });
             callService(method, input, activity.id).then(
-              (output) => callback(null, output),
+              (output) => {
+                callback(null, output);
+                called();
+              },
               (cause: unknown) => callback(cause),
             );
           },
@@ -398,8 +469,13 @@ export class Worker {
         orderBy: { id: "asc" },
       });
 
-      const run = new InstanceRun(this.db, id, this.#payloadPolicy, async (method, params, elementId) =>
-        callMethod(await this.#registry.resolve(method), params, { instanceId: id, elementId }),
+      const run = new InstanceRun(
+        this.db,
+        id,
+        this.#payloadPolicy,
+        async (method, params, elementId) =>
+          callMethod(await this.#registry.resolve(method), params, { instanceId: id, elementId }),
+        (state, variables, consumed) => this.#checkpoint(id, state, variables, consumed),
       );
       let outcome: Outcome;
       try {
@@ -419,6 +495,34 @@ export class Worker {
     } finally {
       clearInterval(heartbeat);
     }
+  }
+
+  /**
+   * Save a run's progress mid-run, keeping the lease: after each successful
+   * service call, so a later failure (or a crash) resumes from here and does
+   * not make finished calls again. Signals the run has applied so far are
+   * part of this state, so they leave the inbox with it.
+   */
+  async #checkpoint(
+    id: string,
+    state: Prisma.InputJsonValue,
+    variables: Record<string, unknown>,
+    consumed: bigint[],
+  ): Promise<void> {
+    await this.db.$transaction(async (tx) => {
+      const { count } = await tx.processInstance.updateMany({
+        where: { id, lockedBy: this.id },
+        data: {
+          status: "running" satisfies InstanceStatus,
+          state,
+          variables: variables as Prisma.InputJsonObject,
+        },
+      });
+      if (count === 0) throw new LeaseLost(id);
+      if (consumed.length > 0) {
+        await tx.processSignal.deleteMany({ where: { id: { in: consumed } } });
+      }
+    });
   }
 
   /** Save the outcome and drop the lease, only if the lease is still ours. */
@@ -476,9 +580,10 @@ export class Worker {
         });
       }
       if (outcome.kind === "failed") {
-        // The failed run's work is thrown away (its state is not saved), so
-        // the signals it consumed stay queued: a retry resumes from the last
-        // saved state and applies them again.
+        // What the run did since its last checkpoint is thrown away (the
+        // state column keeps that checkpoint), so the signals it consumed
+        // since then stay queued: a retry resumes from the checkpoint and
+        // applies them again.
         return;
       }
       if (finished) {
@@ -522,15 +627,63 @@ class InstanceRun {
   #loggedVariables: string | undefined;
   /** Activities that ended or failed in this run, to tell a leave from a discard. */
   #finishedActivities = new Set<string>();
+  /** Checkpoints are written one after another, never after the run returns. */
+  #saving: Promise<void> = Promise.resolve();
+  #saveQueued = false;
+  #savesClosed = false;
 
   constructor(
     private readonly db: PrismaClient,
     private readonly instanceId: string,
     private readonly policy: PayloadPolicy,
     private readonly callService: ServiceCaller,
+    private readonly save: (
+      state: Prisma.InputJsonValue,
+      variables: Record<string, unknown>,
+      consumed: bigint[],
+    ) => Promise<void>,
   ) {}
 
-  async execute(input: {
+  /** Run the instance to rest; no checkpoint lands after this returns. */
+  async execute(input: Parameters<InstanceRun["run"]>[0]): Promise<Outcome> {
+    try {
+      return await this.run(input);
+    } finally {
+      this.#savesClosed = true;
+      await this.#saving;
+    }
+  }
+
+  /**
+   * Save the run's progress, once the engine has settled from what just
+   * happened (the call's result applied, the next steps started). The
+   * snapshot is taken then; only its write waits behind earlier ones, so a
+   * step that fails meanwhile cannot cost the progress made before it. A
+   * save that fails — the lease was lost, the database is gone — fails the run.
+   */
+  #checkpoint(): void {
+    if (this.#saveQueued || this.#savesClosed) return;
+    this.#saveQueued = true;
+    setImmediate(() => {
+      this.#saveQueued = false;
+      const engine = this.#engine;
+      if (this.#savesClosed || this.#finished !== undefined || engine === undefined) return;
+      const { variables } = processData(engine);
+      const consumed = this.consumed.splice(0);
+      const state = engine.getState();
+      this.#saving = this.#saving
+        .then(async () => {
+          const plain = JSON.parse(JSON.stringify(await state)) as Prisma.InputJsonValue;
+          await this.save(plain, variables, consumed);
+        })
+        .catch((cause: unknown) => {
+          this.#finished ??= { kind: "failed", error: message(cause) };
+          this.#wake?.();
+        });
+    });
+  }
+
+  private async run(input: {
     name: string;
     source: string;
     variables: Record<string, unknown>;
@@ -540,7 +693,19 @@ class InstanceRun {
   }): Promise<Outcome> {
     const deadline = Date.now() + input.runTimeoutMs;
     const listener = this.#listener();
-    const extensions = engineExtensions(this.callService);
+    const extensions = engineExtensions(
+      this.callService,
+      (cause) => {
+        this.#finished ??= { kind: "failed", error: message(cause) };
+        this.#wake?.();
+      },
+      (type, elementId, payload) => {
+        const rows = (payload as { mappings: { target: string; value: unknown }[] }).mappings;
+        this.#record(type, elementId, { mappings: maskMappings(rows, this.policy) });
+      },
+      (elementId) => this.#snapshotVariables(elementId),
+      () => this.#checkpoint(),
+    );
 
     let engine: Engine;
     if (input.state === null) {
@@ -551,6 +716,7 @@ class InstanceRun {
         timers: deferredTimers(),
         extensions,
         moddleOptions,
+        scripts: new FeelScripts() as never,
       });
       this.#watch(engine);
       await engine.execute({ listener });
@@ -558,7 +724,12 @@ class InstanceRun {
       const state = input.state as unknown as BpmnEngineExecutionState;
       // What the log last saw: the variables saved when it was parked.
       this.#loggedVariables = this.#snapshotKey(input.variables, {});
-      engine = new Engine({ timers: deferredTimers(), extensions, moddleOptions }).recover(state);
+      engine = new Engine({
+        timers: deferredTimers(),
+        extensions,
+        moddleOptions,
+        scripts: new FeelScripts() as never,
+      }).recover(state);
       this.#watch(engine);
       this.#replayedWaits = new Set(await waitingActivities(this.db, this.instanceId));
       await engine.resume({ listener });
@@ -574,9 +745,14 @@ class InstanceRun {
       // A signal for an element that is not waiting is ignored by the engine;
       // it is still consumed so it cannot fire at some later wait.
       this.#record("signal", signal.elementId, signal.payload);
+      // Signals name the waiting element; one that waits for a Camunda 8
+      // message (a receive task with messageRef) is reached by the message's id.
+      const waiting = (execution as unknown as {
+        getActivityById?(id: string): { behaviour?: { messageRef?: { id?: string } } } | undefined;
+      }).getActivityById?.(signal.elementId);
       execution.signal({
-        id: signal.elementId,
         ...asObject(signal.payload),
+        id: waiting?.behaviour?.messageRef?.id ?? signal.elementId,
       });
       this.consumed.push(signal.id);
       atRest = await this.#settle(deadline);
